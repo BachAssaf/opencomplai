@@ -100,6 +100,7 @@ from opencomplai_cli.commands.checker import (  # noqa: E402
 )
 from opencomplai_cli.commands.dashboard import app as dashboard_app  # noqa: E402
 from opencomplai_cli.commands.interactive_init import run_interactive_init  # noqa: E402
+from opencomplai_cli.commands.push import run_push  # noqa: E402
 from opencomplai_cli.commands.serve import run_serve  # noqa: E402
 
 ai_app = typer.Typer(help="AI intent analysis commands.")
@@ -1287,11 +1288,16 @@ def _scan_should_fail(
     fail_on: FailOnLevel,
     baseline_categories: list[str] | None,
 ) -> bool:
-    if fail_on == FailOnLevel.none:
-        return False
-    # Incomplete / hostile-repo conditions fail any non-none fail-on level.
+    # Incomplete / hostile-repo conditions fail the scan regardless of
+    # fail_on level: a detector crash means the scan didn't run correctly,
+    # not that its findings were merely below the configured severity gate.
+    # Silently passing here is the fail-open behavior a compliance gate must
+    # not have — a crashed detector's evidence is simply missing, and a
+    # "pass" verdict built on incomplete evidence is worse than no verdict.
     if report.scan_errors or report.detector_errors:
         return True
+    if fail_on == FailOnLevel.none:
+        return False
     if fail_on == FailOnLevel.critical:
         return report.severity == DiscrepancySeverity.CRITICAL
     if fail_on == FailOnLevel.major:
@@ -1809,7 +1815,14 @@ def scan_cmd(
         None, "--baseline", help="JSON file with accepted discrepancy categories"
     ),
     fail_on: FailOnLevel = typer.Option(
-        FailOnLevel.none, "--fail-on", help="Opt-in CI gating (default: none)"
+        FailOnLevel.none,
+        "--fail-on",
+        help=(
+            "Gate on discrepancy severity (default: none — no severity-based "
+            "gating). A detector or scan error always fails regardless of this "
+            "setting; the scan didn't run correctly, so its evidence can't be "
+            "used to justify a pass."
+        ),
     ),
     output: OutputFormat = typer.Option(OutputFormat.human, "--output", "-o"),
     output_file: Path | None = typer.Option(
@@ -2093,7 +2106,12 @@ def check_cmd(
     repo_root: Path = typer.Option(Path("."), "--repo-root"),
     emit_scan_evidence: bool = typer.Option(True, "--emit-evidence/--no-emit-evidence"),
     scan_fail_on: FailOnLevel = typer.Option(
-        FailOnLevel.none, "--fail-on", help="Gate check on scan discrepancies"
+        FailOnLevel.none,
+        "--fail-on",
+        help=(
+            "Gate on discrepancy severity (default: none). A detector or scan "
+            "error always fails the check regardless of this setting."
+        ),
     ),
     scan_baseline: Path | None = typer.Option(None, "--baseline"),
     with_gaps: bool = typer.Option(
@@ -2794,6 +2812,27 @@ def serve_cmd(
     run_serve(project_root, host=host, port=port)
 
 
+@app.command("push")
+def push_cmd(
+    artifact_file: Path = typer.Argument(
+        Path("compliance-artifact.json"),
+        help="Path to a compliance-artifact.json (ScanStatusArtifact) to publish",
+    ),
+) -> None:
+    """
+    Publish a signed compliance-artifact.json to the Opencomplai Premium
+    Dashboard (GO-LIVE CORE-4).
+
+    Requires OPENCOMPLAI_API_KEY (an `ock_...` key issued by the dashboard)
+    and OPENCOMPLAI_DASHBOARD_URL (the dashboard's ingest base URL, e.g.
+    `https://app.opencomplai.com/api/ingest`) in the environment. Separate
+    from `check`/`scan`'s CI-gating exit codes: this command's own exit
+    code (0 on success, 3 otherwise) reflects only whether the push
+    reached the dashboard, never the scan result itself.
+    """
+    sys.exit(run_push(artifact_file))
+
+
 # ---------------------------------------------------------------------------
 # risk / docs / sync sub-commands
 # ---------------------------------------------------------------------------
@@ -3175,6 +3214,63 @@ def _require_ai_plugin() -> None:
         sys.exit(1)
 
 
+def _ensure_saas_egress_consent(chosen: str) -> None:
+    """
+    Gate the cloud backend behind an explicit, recorded opt-in (AI-EGRESS).
+
+    The ``saas`` model sends source snippets to a third party — materially
+    different from every other entry in the catalog, all of which run locally
+    and send nothing. Picking it from a list is not consent, so this shows what
+    would leave the machine and requires a yes.
+
+    Non-interactive runs are refused rather than defaulted either way: silently
+    granting would manufacture consent nobody gave, and silently proceeding
+    without it would send data anyway.
+    """
+    if chosen != "saas":
+        return
+
+    from opencomplai_ai.egress import (
+        CONSENT_NOTICE,
+        has_consent,
+        is_offline,
+        record_consent,
+        stdin_is_interactive,
+    )
+
+    if is_offline():
+        err_console.print(
+            "[red]Error:[/red] OPENCOMPLAI_OFFLINE is set, so the 'saas' model "
+            "can never run. Choose a local model instead."
+        )
+        sys.exit(2)
+
+    if has_consent():
+        return
+
+    console.print(f"\n[bold]Data egress notice[/bold]\n\n{CONSENT_NOTICE}\n")
+
+    if not stdin_is_interactive():
+        err_console.print(
+            "[red]Error:[/red] The 'saas' model requires a one-time data-egress "
+            "consent, and stdin is not interactive so it cannot be given here.\n"
+            "Run 'opencomplai ai configure --model saas' on an interactive "
+            "terminal, or choose a local model."
+        )
+        sys.exit(2)
+
+    import questionary
+
+    if not questionary.confirm(
+        "Send source snippets to api.opencomplai.com?", default=False
+    ).ask():
+        err_console.print("[yellow]Not configured.[/yellow] No consent recorded.")
+        sys.exit(1)
+
+    record = record_consent()
+    console.print(f"[green]Consent recorded[/green] at {record.granted_at}")
+
+
 @ai_app.command("configure")
 def ai_configure_cmd(
     model: str | None = typer.Option(
@@ -3197,6 +3293,7 @@ def ai_configure_cmd(
             )
             sys.exit(2)
         chosen = model
+        _ensure_saas_egress_consent(chosen)
     else:
         import questionary
 
@@ -3216,6 +3313,8 @@ def ai_configure_cmd(
         ).ask()
         if chosen is None:
             sys.exit(0)
+
+        _ensure_saas_egress_consent(chosen)
 
         if set_default or questionary.confirm("Save as default?", default=True).ask():
             set_active_model(chosen)

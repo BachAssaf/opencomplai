@@ -30,6 +30,22 @@ from opencomplai_core.models import (
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 
+# How bad each status is: MISSING > PARTIAL > UNVERIFIED > MET. When an article
+# draws on several sources the worst one wins, so a stricter source can never be
+# masked by a laxer one that merely happened to be evaluated first. UNVERIFIED
+# outranks MET because an article is only as evidenced as its least-evidenced
+# source: an unverified obligation alongside a passing rule means work remains,
+# and reporting MET would understate that.
+#
+# `principle_report` rolls these same rows up and must rank them identically, so
+# it imports this table rather than keeping its own copy.
+STATUS_SEVERITY: dict[GapStatus, int] = {
+    GapStatus.MET: 0,
+    GapStatus.UNVERIFIED: 1,
+    GapStatus.PARTIAL: 2,
+    GapStatus.MISSING: 3,
+}
+
 
 @lru_cache(maxsize=1)
 def load_gap_article_map() -> dict[str, Any]:
@@ -194,11 +210,8 @@ def build_gap_report(
             if candidate is None:
                 continue
 
-            if row is None:
-                row = candidate
-            elif candidate.status in (GapStatus.MISSING, GapStatus.PARTIAL) and row.status not in (
-                GapStatus.MISSING,
-                GapStatus.PARTIAL,
+            if row is None or (
+                STATUS_SEVERITY[candidate.status] > STATUS_SEVERITY[row.status]
             ):
                 row = candidate
 

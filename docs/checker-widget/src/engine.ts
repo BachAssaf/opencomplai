@@ -1,8 +1,8 @@
 /**
  * TypeScript port of packages/core/src/opencomplai_core/compliance_checker/engine.py
- * Deterministic compliance checker — checker version checker-2025-07-28.
+ * Deterministic compliance checker — checker version checker-2026-07-24.
  *
- * Must produce identical output to the Python evaluate() for all 17 golden
+ * Must produce identical output to the Python evaluate() for all 20 golden
  * fixtures in packages/core/tests/fixtures/checker_golden/.
  */
 import {
@@ -12,7 +12,7 @@ import {
   StatusChangeItem,
 } from "./catalog";
 
-export const CHECKER_VERSION = "checker-2025-07-28";
+export const CHECKER_VERSION = "checker-2026-07-24";
 
 export type EntityType =
   | "provider"
@@ -56,13 +56,27 @@ function answerEntity(answers: Record<string, unknown>): EntityType {
 }
 
 function determineHighRisk(answers: Record<string, unknown>): boolean {
-  const hr1 = answerBool(answers, "hr1_annex_i");
+  // Art. 6(1) is conjunctive: an Annex I product is high-risk only if it has
+  // an AI safety component AND is required to undergo third-party conformity
+  // assessment. hr1 alone (self-certified Annex I product) does not trigger
+  // high-risk.
+  const hr1 =
+    answerBool(answers, "hr1_annex_i") &&
+    answerBool(answers, "hr8_conformity_assessment");
   const hr2 = answerBool(answers, "hr2_annex_iii");
   if (!hr1 && !hr2) return false;
-  if (answerBool(answers, "hr3_art_6_3")) return false;
-  if (answerBool(answers, "hr4_narrow_task")) return false;
-  if (answerBool(answers, "hr5_no_significant_risk")) return false;
-  if (answerBool(answers, "hr6_accessory")) return false;
+  // Art. 6(3) final subparagraph: an Annex III system that performs profiling
+  // of natural persons is always high-risk, overriding the (a)-(d) exceptions
+  // below. Must be evaluated ahead of them.
+  if (hr2 && answerBool(answers, "hr7_profiling")) return true;
+  // The Art. 6(3)(a)-(d) exceptions are an Annex III derogation only (final
+  // subparagraph of Art. 6(3)); an Annex I trigger has no such exception.
+  if (hr2 && !hr1) {
+    if (answerBool(answers, "hr3_art_6_3")) return false;
+    if (answerBool(answers, "hr4_narrow_task")) return false;
+    if (answerBool(answers, "hr5_no_significant_risk")) return false;
+    if (answerBool(answers, "hr6_accessory")) return false;
+  }
   return true;
 }
 
@@ -291,18 +305,23 @@ export function evaluate(answers: Record<string, unknown>): CheckerResult {
   // Entity-role obligations
   obligationIds.push(...entityObligations(effectiveEntity, isHighRisk));
 
-  // Transparency (limited-risk only)
-  if (answerBool(answers, "r4_transparency") && !isHighRisk) {
+  // Transparency — Art. 50 disclosure duties apply in addition to high-risk
+  // obligations, not instead of them, so the obligation is never gated on
+  // isHighRisk. Only the "transparency_only" status (sole obligation tier)
+  // stays high-risk-gated.
+  if (answerBool(answers, "r4_transparency")) {
     obligationIds.push("transparency");
     path.push("r4:transparency");
-    const nonLiteracy = obligationIds.filter((id) => id !== "ai_literacy");
-    if (
-      (obligationIds.length === 2 &&
-        obligationIds[0] === "ai_literacy" &&
-        obligationIds[1] === "transparency") ||
-      (nonLiteracy.length === 1 && nonLiteracy[0] === "transparency")
-    ) {
-      statusIds.push("transparency_only");
+    if (!isHighRisk) {
+      const nonLiteracy = obligationIds.filter((id) => id !== "ai_literacy");
+      if (
+        (obligationIds.length === 2 &&
+          obligationIds[0] === "ai_literacy" &&
+          obligationIds[1] === "transparency") ||
+        (nonLiteracy.length === 1 && nonLiteracy[0] === "transparency")
+      ) {
+        statusIds.push("transparency_only");
+      }
     }
   }
 

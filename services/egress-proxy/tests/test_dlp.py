@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_egress_proxy.allowlist import (
     ALLOWED_FIELDS,
     validate_destination,
@@ -127,7 +128,9 @@ async def test_sync_metadata_conformant_payload_returns_200(monkeypatch) -> None
         "pending_verifications_count": 0,
     }
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.post("/v1/sync/metadata", json=payload)
     assert response.status_code == 200
@@ -145,7 +148,9 @@ async def test_sync_metadata_forbidden_field_returns_403(monkeypatch) -> None:
         "raw_inference_payload": "this must never leave the local boundary",
     }
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.post("/v1/sync/metadata", json=payload)
     assert response.status_code == 403
@@ -160,7 +165,9 @@ async def test_sync_metadata_model_weights_blocked(monkeypatch) -> None:
     monkeypatch.delenv("PRO_DASHBOARD_URL", raising=False)
     payload = {"system_id": "sys-1", "model_weights_path": "/data/model.bin"}
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.post("/v1/sync/metadata", json=payload)
     assert response.status_code == 403
@@ -173,7 +180,9 @@ async def test_sync_metadata_disallowed_destination_returns_403(monkeypatch) -> 
     monkeypatch.setenv("EGRESS_ALLOWLIST", "https://dashboard.opencomplai.com")
     payload = {"system_id": "sys-1", "risk_class": "minimal"}
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.post("/v1/sync/metadata", json=payload)
     assert response.status_code == 403
@@ -189,7 +198,9 @@ async def test_sync_metadata_empty_allowlist_blocks_configured_destination(
     monkeypatch.delenv("EGRESS_ALLOWLIST", raising=False)
     payload = {"system_id": "sys-1", "risk_class": "minimal"}
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.post("/v1/sync/metadata", json=payload)
     assert response.status_code == 403
@@ -199,7 +210,9 @@ async def test_sync_metadata_empty_allowlist_blocks_configured_destination(
 async def test_sync_metadata_non_json_body_returns_422(monkeypatch) -> None:
     monkeypatch.delenv("PRO_DASHBOARD_URL", raising=False)
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.post(
             "/v1/sync/metadata",
@@ -212,7 +225,9 @@ async def test_sync_metadata_non_json_body_returns_422(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_egress_health_returns_200() -> None:
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'egress-proxy-test-secret')}"},
     ) as client:
         response = await client.get("/egress-health")
     assert response.status_code == 200

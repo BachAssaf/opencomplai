@@ -47,7 +47,7 @@ interface GoldenFixture {
   expected: GoldenExpected;
 }
 
-// ── inline all 17 fixtures ────────────────────────────────────────────────────
+// ── inline all 20 fixtures ────────────────────────────────────────────────────
 // Inlined (rather than dynamic import) so vitest works without extra config.
 const FIXTURES: GoldenFixture[] = [
   {
@@ -237,10 +237,54 @@ const FIXTURES: GoldenFixture[] = [
       determination_path: ["gate:yes", "e1:provider", "s1:in_scope", "e1:ai_literacy"],
     },
   },
+  {
+    name: "18_high_risk_transparency",
+    session: { answers: { gate_is_ai_system: true, e1_entity_type: "provider", hr2_annex_iii: true, s1_in_scope: true, r4_transparency: true } },
+    expected: {
+      in_scope: true, is_high_risk: true, is_prohibited: false,
+      effective_entity: "provider",
+      status_change_ids: ["high_risk"],
+      obligation_ids: ["ai_literacy", "provider_high_risk", "transparency"],
+      determination_path: ["gate:yes", "e1:provider", "hr:high_risk", "s1:in_scope", "e1:ai_literacy", "r4:transparency"],
+    },
+  },
+  {
+    name: "19_annex_iii_profiling_override",
+    session: {
+      answers: {
+        gate_is_ai_system: true, e1_entity_type: "provider", hr2_annex_iii: true, hr7_profiling: true,
+        hr3_art_6_3: true, hr4_narrow_task: true, hr5_no_significant_risk: true, hr6_accessory: true,
+        s1_in_scope: true,
+      },
+    },
+    expected: {
+      in_scope: true, is_high_risk: true, is_prohibited: false,
+      effective_entity: "provider",
+      status_change_ids: ["high_risk"],
+      obligation_ids: ["ai_literacy", "provider_high_risk"],
+      determination_path: ["gate:yes", "e1:provider", "hr:high_risk", "s1:in_scope", "e1:ai_literacy"],
+    },
+  },
+  {
+    name: "20_annex_i_conformity_assessment",
+    session: {
+      answers: {
+        gate_is_ai_system: true, e1_entity_type: "provider", hr1_annex_i: true,
+        hr8_conformity_assessment: true, s1_in_scope: true,
+      },
+    },
+    expected: {
+      in_scope: true, is_high_risk: true, is_prohibited: false,
+      effective_entity: "provider",
+      status_change_ids: ["high_risk"],
+      obligation_ids: ["ai_literacy", "provider_high_risk"],
+      determination_path: ["gate:yes", "e1:provider", "hr:high_risk", "s1:in_scope", "e1:ai_literacy"],
+    },
+  },
 ];
 
 // ── run ───────────────────────────────────────────────────────────────────────
-describe("TS engine golden parity (17 fixtures)", () => {
+describe("TS engine golden parity (20 fixtures)", () => {
   for (const fixture of FIXTURES) {
     it(fixture.name, () => {
       const result = evaluate(fixture.session.answers);

@@ -16,11 +16,14 @@ from opencomplai_core.scanner.ocignore import (
 )
 
 
-def test_parse_default_template_limits_unlimited():
+def test_parse_default_template_limits_are_bounded():
+    # DOS-LIMITS: a bounded default is the safer failure mode for a
+    # compliance scanner — an .ocignore with no [limits] section gets
+    # InventoryLimits' real defaults, not unlimited scanning.
     cfg = parse_ocignore(DEFAULT_OCIGNORE_TEMPLATE)
-    assert cfg.limits.max_files == 0
-    assert cfg.limits.max_bytes_per_file == 0
-    assert cfg.limits.max_total_bytes == 0
+    assert cfg.limits.max_files == 20_000
+    assert cfg.limits.max_bytes_per_file == 1_048_576
+    assert cfg.limits.max_total_bytes == 209_715_200
     assert cfg.limits.skip_binary is False
     assert cfg.limits.max_symlink_depth == 5
     assert cfg.limits.max_notebook_cells == 500
@@ -63,7 +66,9 @@ max_files = not_a_number
 skip_binary = maybe
 """
     cfg = parse_ocignore(content)
-    assert cfg.limits.max_files == 0
+    # DOS-LIMITS: an invalid override falls back to InventoryLimits' bounded
+    # default (20_000), not unlimited.
+    assert cfg.limits.max_files == 20_000
     assert cfg.limits.skip_binary is False
     assert len(cfg.warnings) >= 2
 
@@ -84,7 +89,9 @@ def test_bom_and_crlf_tolerant():
 def test_load_missing_returns_empty_patterns(tmp_path: Path):
     cfg = load_ocignore(tmp_path)
     assert cfg.patterns == []
-    assert cfg.limits.max_files == 0
+    # DOS-LIMITS: no .ocignore present still gets a bounded default, not
+    # unlimited scanning of an unbounded repository.
+    assert cfg.limits.max_files == 20_000
 
 
 def test_resolve_ocignore_must_be_under_repo(tmp_path: Path):

@@ -35,7 +35,7 @@
   },
   "high_risk_overview": {
     "title": "High-risk classification",
-    "body": "An AI system is high-risk if it is a product covered by Union harmonisation legislation listed in Annex I with a required third-party conformity assessment, and the product includes an AI system as a safety component; or if it is listed in Annex III and none of the Article 6(3) exceptions apply."
+    "body": "An AI system is high-risk if it is a product covered by Union harmonisation legislation listed in Annex I with a required third-party conformity assessment, and the product includes an AI system as a safety component; or if it is listed in Annex III and none of the Article 6(3) exceptions apply. An Annex III system that performs profiling of natural persons is always high-risk, regardless of whether any exception would otherwise apply."
   },
   "scope_overview": {
     "title": "Scope of the AI Act",
@@ -48,6 +48,10 @@
   "gpai_overview": {
     "title": "General-purpose AI models",
     "body": "A general-purpose AI model is an AI model, including where trained with a large amount of data using self-supervision at scale, that displays significant generality and is capable of competently performing a wide range of distinct tasks. Chapter V sets obligations for GPAI model providers distinct from high-risk AI system obligations."
+  },
+  "gpai_systemic_risk_threshold": {
+    "title": "GPAI systemic risk — the Article 51 test",
+    "body": "This is not a subjective judgement call. Under Article 51(1)(a), a GPAI model is presumed to have systemic risk when the cumulative compute used for its training exceeds 10^25 floating point operations (FLOPs). Separately, under Article 51(1)(b) the Commission may designate a model as having systemic risk based on the Annex XIII criteria (reach, number of registered business users, market impact, and similar factors), or acting on a qualified alert from the scientific panel under Article 90 — regardless of the compute figure. A provider whose model meets or is likely to meet the compute threshold must notify the Commission under Article 52(1) without undue delay and in any event within two weeks of the criteria being met."
   },
   "disclaimer": {
     "title": "Not legal advice",

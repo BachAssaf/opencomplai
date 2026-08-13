@@ -5,6 +5,13 @@ from datetime import datetime
 from sqlalchemy import BigInteger, DateTime, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+# Sentinel tenant_id for OSS/self-hosted callers that carry no tenant context
+# (the CLI's direct evidence-vault use, or any caller that omits X-Tenant-Id).
+# Keeps a single evidence-vault schema/deployment serving both OSS installs
+# and SaaS tenants — SaaS tenants never collide with this value since real
+# tenant ids come from dashboard_db.tenants.id (TEN-VAULT).
+OSS_DEFAULT_TENANT_ID = "oss-default"
+
 
 class Base(DeclarativeBase):
     pass
@@ -14,6 +21,9 @@ class LedgerEventDB(Base):
     __tablename__ = "ledger_events"
 
     event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, default=OSS_DEFAULT_TENANT_ID, index=True
+    )
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     payload_hash: Mapped[str] = mapped_column(String(71), nullable=False)
@@ -44,6 +54,9 @@ class DossierIndexDB(Base):
     __tablename__ = "dossier_index"
 
     dossier_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(128), nullable=False, default=OSS_DEFAULT_TENANT_ID, index=True
+    )
     system_id: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     commit_ref: Mapped[str] = mapped_column(String(256), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(71), nullable=False)
@@ -62,7 +75,6 @@ class EvidenceObjectDB(Base):
         String(71), nullable=False, unique=True, index=True
     )
     storage_uri: Mapped[str] = mapped_column(String(1024), nullable=False)
-    encryption_profile: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

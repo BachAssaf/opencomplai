@@ -28,7 +28,7 @@
   "Art. 10": {
     "sources": [
       { "kind": "evaluator", "ref": "EVAL_BIAS_FAIRNESS_V1" },
-      { "kind": "scan", "ref": "PII_DATAFLOW" }
+      { "kind": "scan", "ref": "pii_dataflow" }
     ]
   },
   "Art. 11": {

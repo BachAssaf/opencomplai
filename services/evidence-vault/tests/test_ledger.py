@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
+
 import pytest
 import pytest_asyncio
 from opencomplai_evidence_vault.ledger import (
     _canonical,
+    _next_seq,
     _sha256,
     append_event,
     verify_chain,
@@ -37,7 +41,7 @@ def test_canonical_is_deterministic():
 
 
 @pytest_asyncio.fixture
-async def session() -> AsyncSession:
+async def sessionmaker_() -> async_sessionmaker[AsyncSession]:
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -46,11 +50,17 @@ async def session() -> AsyncSession:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-    async with sessionmaker() as s:
-        yield s
+    yield async_sessionmaker(engine, expire_on_commit=False)
 
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def session(
+    sessionmaker_: async_sessionmaker[AsyncSession],
+) -> AsyncSession:
+    async with sessionmaker_() as s:
+        yield s
 
 
 @pytest.mark.asyncio
@@ -89,3 +99,75 @@ async def test_verify_chain_detects_tamper(session: AsyncSession):
     await session.commit()
 
     assert await verify_chain(session) is False
+
+
+@pytest.mark.asyncio
+async def test_append_event_retries_past_a_deterministic_seq_collision(
+    session: AsyncSession, monkeypatch
+):
+    """
+    PERSIST-RACES: _next_seq's MAX(seq)+1 read has no locking, so a
+    concurrent writer can commit the same seq between our read and our
+    insert. Reproduced deterministically (no scheduler timing dependency) by
+    making the *first* _next_seq call inside append_event return a seq a row
+    already occupies — the flush must raise IntegrityError, the SAVEPOINT
+    must roll back cleanly, and the retry (a real, uncorrupted _next_seq
+    call) must succeed.
+    """
+    occupied = await _next_seq(session)
+    taken = LedgerEventDB(
+        event_id="pre-seeded",
+        ts=datetime.now(UTC),
+        event_type="pre_seeded",
+        payload_hash=_sha256("x"),
+        prev_hash=_sha256(""),
+        seq=occupied,
+    )
+    session.add(taken)
+    await session.flush()
+
+    real_next_seq = _next_seq
+    calls = {"n": 0}
+
+    async def _stale_once(s: AsyncSession) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return occupied  # forces a collision with `taken` on first attempt
+        return await real_next_seq(s)
+
+    monkeypatch.setattr(
+        "opencomplai_evidence_vault.ledger._next_seq", _stale_once
+    )
+
+    event = await append_event(session, event_type="test", payload={"n": 1})
+    await session.commit()
+
+    assert calls["n"] == 2  # one collision, one successful retry
+    assert event.seq != occupied
+
+
+@pytest.mark.asyncio
+async def test_concurrent_append_event_both_succeed(
+    sessionmaker_: async_sessionmaker[AsyncSession],
+):
+    """
+    Two writers on separate sessions/connections append concurrently via
+    asyncio.gather. SQLite serializes at the file-lock level so this doesn't
+    reliably reproduce the IntegrityError itself (that's
+    test_append_event_retries_past_a_deterministic_seq_collision's job) —
+    but it does pin the outward contract PERSIST-RACES restores: neither
+    writer's append_event call raises, and both events persist with
+    distinct seq values, whatever interleaving actually occurred.
+    """
+
+    async def _append(payload: dict) -> LedgerEventDB:
+        async with sessionmaker_() as s:
+            event = await append_event(s, event_type="concurrent", payload=payload)
+            await s.commit()
+            return event
+
+    e1, e2 = await asyncio.gather(_append({"n": 1}), _append({"n": 2}))
+
+    assert e1.event_id != e2.event_id
+    assert e1.seq is not None
+    assert e2.seq is not None

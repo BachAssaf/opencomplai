@@ -128,8 +128,63 @@ class EvidenceObject(BaseModel):
     evidence_id: str
     content_hash: str   # SHA-256; also the storage key
     storage_uri: str    # Local file path or URI
-    encryption_profile: str  # "AES-256-GCM" | "none"
 ```
+
+**Evidence objects are stored as plaintext.** Both CAS backends — the local
+filesystem store and the Vercel Blob store — write the bytes as given; the
+blob store's `access: private` is an access-control setting, not encryption.
+
+- **Integrity** is enforced: `read()` re-hashes the stored bytes and compares
+  them against the content hash, so silent corruption or substitution is
+  detected.
+- **Confidentiality** is delegated to the deployment layer — an encrypted
+  volume for the local backend, bucket-level encryption for object storage.
+
+This model previously declared `encryption_profile: str` documented as
+`"AES-256-GCM" | "none"`. Nothing ever wrote it, nothing ever read it, and no
+backend has ever encrypted anything, so the field's only effect was to tell a
+reader of this document — and of the generated OpenAPI, which carried the same
+description — that a control existed which did not. It was removed in
+EVID-CRYPTO. Encryption at rest, if built, requires a key-management decision
+this project has not yet made and changes what the content hash addresses; it
+will arrive as an explicit design rather than by reinstating the field.
+
+## Signature domain separation
+
+Every Ed25519 signature this system produces covers domain-separated bytes:
+
+```
+opencomplai.sig.v1 \0 <purpose> \0 <canonical payload>
+```
+
+where `<purpose>` is one of `scan-status-artifact`, `annex-iv-dossier-bundle`
+or `compliance-badge`.
+
+**Why.** One install keypair signs all three message formats, and nothing in
+the signed bytes said which was which. Because the artifact signer and the
+badge verifier both serialised with `json.dumps(..., sort_keys=True)`, their
+preimages were byte-identical: a signature produced by
+`opencomplai check --sign` verified, unmodified, as a valid compliance-badge
+signature for the same object. One attestation could stand in for another.
+Binding the purpose into the signed bytes is what makes a signature mean "this
+key attests *this kind of thing*".
+
+Separate keypairs per message type were considered and rejected: all three uses
+share the same trust semantics ("this install produced this"), so the tag is the
+complete answer and four keypairs would be four rotation problems.
+
+**Migration — this is a hard cutover.** Signatures produced before this change
+do not verify, and there is deliberately no flag to accept them. Nothing in this
+system re-verifies a stored signature: badge rows are inert attestations,
+dossier signatures were never verified in production, and artifact signatures
+are checked once at ingest against a freshly presented envelope. An accept-both
+window would therefore have protected nothing while continuing to accept exactly
+the confusable signatures the change removes. Anything you need to verify again
+must be re-signed.
+
+Both implementations of the framing — `opencomplai_core.signing` and the
+independent `dashboard_ingest.canonical` mirror — are held byte-identical by a
+parity test.
 
 ## Enumerations
 

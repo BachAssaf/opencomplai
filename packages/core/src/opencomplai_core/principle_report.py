@@ -11,16 +11,15 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from opencomplai_core.models import GapReport, GapStatus, PrincipleStatus, PrincipleSummary
+from opencomplai_core.gap_report import STATUS_SEVERITY
+from opencomplai_core.models import (
+    GapReport,
+    GapStatus,
+    PrincipleStatus,
+    PrincipleSummary,
+)
 
 _DATA_PATH = Path(__file__).resolve().parent / "data" / "eu_ai_act_principles.json"
-
-_STATUS_SEVERITY = {
-    GapStatus.MISSING: 3,
-    GapStatus.PARTIAL: 2,
-    GapStatus.UNVERIFIED: 1,
-    GapStatus.MET: 0,
-}
 
 
 @lru_cache(maxsize=1)
@@ -32,8 +31,8 @@ def build_principle_summary(gap_report: GapReport) -> PrincipleSummary:
     """Roll up gap_report.articles into a per-principle worst-case status.
 
     A principle's status is the most severe status among its mapped articles
-    (MISSING > PARTIAL > UNVERIFIED > MET) — matching the existing gap-report
-    convention where a MISSING/PARTIAL finding wins over a MET/UNVERIFIED one.
+    (MISSING > PARTIAL > UNVERIFIED > MET), using the same `STATUS_SEVERITY`
+    ranking `gap_report` applies across an article's sources.
     Articles not present in gap_report.articles are simply not counted.
     """
     principle_map = load_principle_map()["principles"]
@@ -50,7 +49,7 @@ def build_principle_summary(gap_report: GapReport) -> PrincipleSummary:
         if not present_statuses:
             rollup_status = GapStatus.UNVERIFIED
         else:
-            rollup_status = max(present_statuses, key=lambda s: _STATUS_SEVERITY[s])
+            rollup_status = max(present_statuses, key=lambda s: STATUS_SEVERITY[s])
 
         principles.append(
             PrincipleStatus(

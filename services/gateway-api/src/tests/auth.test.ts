@@ -58,6 +58,24 @@ describe('Gateway authentication contract', () => {
     }
   });
 
+  it('rejects a key of a different length without throwing (timingSafeEqual length guard)', async () => {
+    process.env.OPENCOMPLAI_API_KEY = 'a-reasonably-long-shared-secret';
+    const app = buildApp();
+    await app.ready();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/manifests/validate',
+        headers: { 'x-api-key': 'short' },
+        payload: { system_id: 'x', intended_purpose: 'y' },
+      });
+      expect(res.statusCode).toBe(401);
+      expect(JSON.parse(res.body).error_code).toBe('POLICY_DENIED');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts requests carrying the correct x-api-key header', async () => {
     process.env.OPENCOMPLAI_API_KEY = 'test-secret';
     // Point at a black hole so the response is a deterministic 503 rather than

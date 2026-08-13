@@ -15,8 +15,9 @@ import os
 import urllib.request
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from opencomplai_core.service_auth import load_shared_secret, mint_service_token
 from opencomplai_core.telemetry import configure_telemetry, metrics_response
 
 from opencomplai_egress_proxy.allowlist import (
@@ -24,6 +25,7 @@ from opencomplai_egress_proxy.allowlist import (
     validate_destination,
     validate_payload,
 )
+from opencomplai_egress_proxy.service_auth_dependency import require_service_principal
 
 try:
     from prometheus_client import Counter as _Counter
@@ -50,6 +52,19 @@ configure_telemetry("egress-proxy")
 
 GATEWAY_API_URL = os.environ.get("GATEWAY_API_URL", "http://gateway-api:8080")
 EVIDENCE_VAULT_URL = os.environ.get("EVIDENCE_VAULT_URL", "http://evidence-vault:8002")
+
+# Every route below requires a valid internal service token (SEC-SERVICE-AUTH) —
+# only /egress-health, /metrics, and /health stay reachable without one.
+router = APIRouter(dependencies=[Depends(require_service_principal)])
+
+
+def _service_token_header(issuer: str = "egress-proxy") -> dict[str, str]:
+    """Signed service-token header this proxy attaches to its own outbound calls."""
+    secret = load_shared_secret()
+    if secret is None:
+        return {}
+    token = mint_service_token(issuer, secret)
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +96,7 @@ def _emit_egress_blocked(
     req = urllib.request.Request(
         f"{EVIDENCE_VAULT_URL}/v1/evidence/events",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_service_token_header()},
         method="POST",
     )
     try:
@@ -150,7 +165,7 @@ async def gateway_health() -> Response:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/v1/sync/metadata")
+@router.post("/v1/sync/metadata")
 async def sync_metadata(request: Request) -> Response:
     """
     Accept a metadata sync payload, validate it against the allowlist schema,
@@ -223,7 +238,7 @@ async def sync_metadata(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@app.api_route(
+@router.api_route(
     "/v1/pro/ingest/{sub_path:path}",
     methods=["POST"],
 )
@@ -240,13 +255,23 @@ async def pro_ingest(sub_path: str, request: Request) -> Response:
     """
     body = await request.body()
 
+    # Relay the caller's X-Tenant-Id (TEN-VAULT) so the ingested artifact
+    # lands in evidence-vault under the right tenant's RLS scope — this
+    # route doesn't resolve tenancy itself, only forwards what gateway-api
+    # already resolved for the inbound request.
+    tenant_id = request.headers.get("x-tenant-id", "oss-default")
+
     url = f"{EVIDENCE_VAULT_URL}/v1/pro/ingest/{sub_path}"
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
                 url,
                 content=body,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Tenant-Id": tenant_id,
+                    **_service_token_header(),
+                },
             )
             return Response(
                 content=r.content,
@@ -269,7 +294,7 @@ async def pro_ingest(sub_path: str, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@app.api_route(
+@router.api_route(
     "/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
 )
@@ -310,3 +335,6 @@ async def proxy_to_gateway(path: str, request: Request) -> Response:
                 "retryable": True,
             },
         )
+
+
+app.include_router(router)

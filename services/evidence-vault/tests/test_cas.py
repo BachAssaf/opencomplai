@@ -49,3 +49,43 @@ def test_exists(cas: CASStore):
     content_hash = cas.write(b"existence test")
     assert cas.exists(content_hash) is True
     assert cas.exists("sha256:" + "f" * 64) is False
+
+
+# ---------------------------------------------------------------------------
+# Path traversal (M-02) — content_hash must be validated before any
+# filesystem operation, not merely have "sha256:" stripped.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_hash",
+    [
+        "sha256:../../../../etc/passwd",
+        "sha256:" + "../" * 20 + "etc/passwd",
+        "sha256:" + "a" * 63,  # too short
+        "sha256:" + "a" * 65,  # too long
+        "sha256:" + "A" * 64,  # uppercase not allowed
+        "sha256:" + "g" * 64,  # non-hex char
+        "not-a-hash",
+        "sha256:",
+    ],
+)
+def test_read_rejects_traversal_and_malformed_hashes(cas: CASStore, bad_hash: str):
+    with pytest.raises(ValueError, match="Invalid content hash format"):
+        cas.read(bad_hash)
+
+
+def test_path_for_rejects_traversal_hash(cas: CASStore):
+    with pytest.raises(ValueError, match="Invalid content hash format"):
+        cas._path_for("sha256:../../../../etc/passwd")
+
+
+def test_path_for_never_escapes_base_dir(cas: CASStore):
+    content_hash = cas.write(b"containment check")
+    resolved = cas._path_for(content_hash)
+    assert resolved.is_relative_to(cas.base_dir.resolve())
+
+
+def test_exists_rejects_traversal_hash(cas: CASStore):
+    with pytest.raises(ValueError, match="Invalid content hash format"):
+        cas.exists("sha256:../../../../etc/passwd")

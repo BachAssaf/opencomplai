@@ -9,6 +9,10 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] — 2026-08-13
+
 ### Added
 
 - Fail-closed scanner defaults: refuse symlinks, numeric file/byte caps, report
@@ -33,6 +37,30 @@ project follows [Semantic Versioning](https://semver.org/).
   pip extra `inspect-bridge`, module `opencomplai_core.bridges.inspect_eval`,
   evaluator IDs `EVAL_INSPECT_*` (evidence hashes change). Previous suite/extra
   identifiers removed with no aliases.
+- **Breaking (signatures):** every Ed25519 signature is now domain-separated —
+  the signed bytes are `opencomplai.sig.v1\0<purpose>\0<payload>`. One keypair
+  signs scan-status artifacts, Annex IV dossier bundles and compliance badges,
+  and nothing in the signed bytes said which was which: a signature from
+  `opencomplai check --sign` verified unmodified as a compliance-badge
+  signature for the same object. `sign_bundle_bytes`/`verify_bundle_bytes` now
+  take a required `domain`. **Signatures produced before this change do not
+  verify, deliberately and with no compatibility flag** — nothing in the system
+  re-verifies a stored signature, so an accept-both window would only have kept
+  the confusion alive. Re-sign anything you need to verify again.
+- **Breaking (badges):** issuing a badge now requires a signature whenever
+  `OSS_BADGE_PUBLIC_KEY_PATH` is set. Previously an unsigned request skipped
+  verification entirely even with the key configured. With no key configured,
+  unsigned issuance is unchanged — that is OSS unsigned mode.
+
+### Removed
+
+- `EvidenceObject.encryption_profile` and the `evidence_objects`
+  `encryption_profile` column (evidence-vault migration `0006`). It advertised
+  `"AES-256-GCM"`, including in the generated OpenAPI, while no CAS backend has
+  ever encrypted anything; nothing wrote it and nothing read it. Evidence
+  objects are stored as plaintext — integrity comes from content-hash
+  re-verification on read, confidentiality from volume- or bucket-level
+  encryption at the deployment layer.
 
 ---
 
@@ -108,5 +136,6 @@ pip install -e packages/core -e packages/cli -e packages/sdk-python
 See [Contributing — Release Process](docs/src/contributing/release-process.md) for the
 release/publish workflow.
 
+[0.3.0]: https://github.com/Opencomplai/opencomplai/releases/tag/v0.3.0
 [0.1.2]: https://github.com/Opencomplai/opencomplai/releases/tag/v0.1.2
 [0.1.0]: https://github.com/Opencomplai/opencomplai/releases/tag/v0.1.0

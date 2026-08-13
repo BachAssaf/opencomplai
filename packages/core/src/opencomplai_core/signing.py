@@ -15,11 +15,51 @@ import base64
 import json
 import os
 import uuid
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from opencomplai_core.models import ScanStatusArtifact
+
+
+_DOMAIN_PREFIX = b"opencomplai.sig.v1"
+
+
+class SigningDomain(StrEnum):
+    """
+    What a signature is *for*.
+
+    One Ed25519 keypair signs four unrelated message formats in this system:
+    scan-status artifacts, Annex IV dossier bundles, compliance badges, and
+    (elsewhere) a KMS-signed bundle key. Nothing in the signed bytes said which
+    was which, and that was not theoretical — a signature produced by
+    ``opencomplai check --sign`` verified, unmodified, as a valid
+    compliance-badge signature for the same artifact, because both sides
+    serialise with ``json.dumps(..., sort_keys=True)`` and the two preimages
+    come out byte-identical.
+
+    Binding the purpose into the signed bytes is what makes a signature mean
+    "this key attests *this artifact*" rather than "this key signed *these
+    bytes*, for some purpose you must infer from context".
+    """
+
+    ARTIFACT = "scan-status-artifact"
+    DOSSIER_BUNDLE = "annex-iv-dossier-bundle"
+    BADGE = "compliance-badge"
+
+
+def domain_separated(domain: SigningDomain, payload: bytes) -> bytes:
+    """
+    Bind ``payload`` to a purpose before signing.
+
+    ``opencomplai.sig.v1\\x00<domain>\\x00<payload>``. The version sits in the
+    prefix so a future scheme change is a new prefix rather than a silent
+    reinterpretation of the same bytes, and the NUL separators make the framing
+    unambiguous — no domain value contains a NUL, so no payload can be
+    constructed that shifts the boundary and impersonates another domain.
+    """
+    return _DOMAIN_PREFIX + b"\x00" + domain.value.encode("ascii") + b"\x00" + payload
 
 
 def generate_keypair(key_dir: Path) -> str:
@@ -75,48 +115,84 @@ def sign_artifact(artifact: ScanStatusArtifact, key_path: Path) -> str:
     """
     Sign a ScanStatusArtifact with the Ed25519 private key at key_path.
 
-    The signature covers json.dumps(artifact.model_dump(exclude={"signature"}), sort_keys=True).
-    Returns a base64-encoded signature string.
+    The signature covers ``domain_separated(SigningDomain.ARTIFACT,
+    _canonical_payload(artifact))``.
+
+    The domain tag is applied here, around the canonical payload, rather than
+    inside ``_canonical_payload``. That is deliberate: ``_canonical_payload``'s
+    output is a published cross-implementation contract — ``dashboard_ingest``
+    reimplements it in ``canonical.py`` and a parity test fails the build on the
+    first divergent byte — so the canonicalisation and the signing envelope have
+    to stay separable.
     """
     from cryptography.hazmat.primitives import serialization
 
     private_bytes = _load_private_key_bytes(key_path)
     private_key = serialization.load_pem_private_key(private_bytes, password=None)
 
-    payload = _canonical_payload(artifact)
+    payload = domain_separated(SigningDomain.ARTIFACT, _canonical_payload(artifact))
     sig_bytes = private_key.sign(payload)
     return base64.b64encode(sig_bytes).decode("utf-8")
 
 
-def sign_bundle_bytes(bundle_bytes: bytes, key_path: Path) -> str:
+def sign_bundle_bytes(
+    bundle_bytes: bytes, key_path: Path, domain: SigningDomain
+) -> str:
     """
-    Sign arbitrary canonical bundle bytes (e.g. the Annex IV dossier bundle
-    JSON) with the Ed25519 private key at key_path.
+    Sign canonical bundle bytes for one specific purpose.
 
-    Returned signature is base64-encoded. Verifiable with verify_bundle_bytes
-    using the corresponding public key. This is the asymmetric path that
-    Pro/Enterprise dossiers use; OSS falls back to HMAC (no public key needed)
-    or remains unsigned.
+    ``domain`` is required and has no default. It used to be absent entirely,
+    and the result was that this function would sign anything and
+    ``verify_bundle_bytes`` would accept anything the key had ever signed — a
+    dossier-bundle signature and a compliance-badge signature were the same
+    object. Defaulting the parameter would have kept every existing caller
+    silently on the ambiguous path, which is the failure this change exists to
+    remove.
+
+    Returned signature is base64-encoded, and verifies only via
+    ``verify_bundle_bytes`` with the *same* domain. This is the asymmetric path
+    that Pro/Enterprise dossiers use; OSS falls back to HMAC (no public key
+    needed) or remains unsigned.
     """
     from cryptography.hazmat.primitives import serialization
 
     private_bytes = _load_private_key_bytes(key_path)
     private_key = serialization.load_pem_private_key(private_bytes, password=None)
-    sig_bytes = private_key.sign(bundle_bytes)
+    sig_bytes = private_key.sign(domain_separated(domain, bundle_bytes))
     return base64.b64encode(sig_bytes).decode("utf-8")
 
 
 def verify_bundle_bytes(
-    bundle_bytes: bytes, signature_b64: str, pub_key_path: Path
+    bundle_bytes: bytes,
+    signature_b64: str,
+    pub_key_path: Path,
+    domain: SigningDomain,
 ) -> bool:
-    """Verify a bundle-bytes signature produced by sign_bundle_bytes."""
+    """
+    Verify a bundle-bytes signature produced by ``sign_bundle_bytes`` for
+    ``domain``. A signature made for a *different* domain does not verify here —
+    that is the entire point.
+
+    **This is a hard cutover: signatures made before domain separation do not
+    verify, and there is deliberately no option to accept them.** An
+    accept-both window was considered and rejected. Nothing in this system ever
+    re-verifies a stored signature — badge rows are inert attestations,
+    dossier signatures are never verified in production — so "existing
+    signatures stop verifying" has no code path to break. What such a window
+    *would* do is keep the confusion alive under a flag: while untagged
+    signatures are accepted, a signature minted in one context still passes as
+    another, which is the defect being removed. See the migration note in
+    ``docs/src/architecture/data-model.md``.
+    """
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import serialization
 
     pub_bytes = pub_key_path.read_bytes()
     public_key = serialization.load_pem_public_key(pub_bytes)
     try:
-        public_key.verify(base64.b64decode(signature_b64), bundle_bytes)
+        public_key.verify(
+            base64.b64decode(signature_b64), domain_separated(domain, bundle_bytes)
+        )
         return True
     except InvalidSignature:
         return False
@@ -137,8 +213,8 @@ def verify_artifact(artifact: ScanStatusArtifact, pub_key_path: Path) -> bool:
     pub_bytes = pub_key_path.read_bytes()
     public_key = serialization.load_pem_public_key(pub_bytes)
 
-    payload = _canonical_payload(artifact)
     sig_bytes = base64.b64decode(artifact.signature)
+    payload = domain_separated(SigningDomain.ARTIFACT, _canonical_payload(artifact))
     try:
         public_key.verify(sig_bytes, payload)
         return True
@@ -146,7 +222,26 @@ def verify_artifact(artifact: ScanStatusArtifact, pub_key_path: Path) -> bool:
         return False
 
 
+def canonical_json_bytes(data: dict) -> bytes:
+    """
+    The one canonical JSON serialisation used for anything this key signs.
+
+    ``badges.py`` used to re-implement this inline as
+    ``json.dumps(artifact, sort_keys=True)`` — the same call minus
+    ``default=str``. The two agreed byte-for-byte only because badge artifacts
+    happen to contain JSON-native scalars; a datetime or Decimal appearing in
+    one and not the other would have made a valid signature stop verifying,
+    with no test catching it. Having one implementation is what makes the
+    domain tags meaningful rather than decorative.
+
+    ``default=str`` is retained for parity with ``dashboard_ingest.canonical``,
+    which must match this byte-for-byte. It is a defensive fallback, not a
+    licence to sign arbitrary objects — a value it has to stringify is a bug in
+    the caller, not a supported case.
+    """
+    return json.dumps(data, sort_keys=True, default=str).encode("utf-8")
+
+
 def _canonical_payload(artifact: ScanStatusArtifact) -> bytes:
     """Return the deterministic bytes that are signed/verified."""
-    data = artifact.model_dump(exclude={"signature"})
-    return json.dumps(data, sort_keys=True, default=str).encode("utf-8")
+    return canonical_json_bytes(artifact.model_dump(exclude={"signature"}))

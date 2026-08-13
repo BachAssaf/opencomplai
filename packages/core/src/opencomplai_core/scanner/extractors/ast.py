@@ -5,7 +5,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from opencomplai_core.scanner.feature_types import CallsiteRef, FrameworkObjectRef, ImportRef
+from opencomplai_core.scanner.extractors.javascript import collect_js
+from opencomplai_core.scanner.feature_types import (
+    CallsiteRef,
+    FrameworkObjectRef,
+    ImportRef,
+)
 from opencomplai_core.scanner.inventory import RepoInventory
 
 
@@ -67,6 +72,15 @@ def _collect_ast(inventory: RepoInventory) -> tuple[list[ImportRef], list[Callsi
         )
         imports.extend(file_imports)
         callsites.extend(file_calls)
+
+    # JS/TS goes through a regex extractor rather than a parser (SCAN-COVERAGE,
+    # finding 83). Its output uses the same ImportRef/CallsiteRef types, so
+    # detectors and scoring treat a TypeScript import exactly like a Python one
+    # instead of needing a parallel code path.
+    js_imports, js_callsites = collect_js(inventory.entries)
+    imports.extend(js_imports)
+    callsites.extend(js_callsites)
+
     return imports, callsites
 
 

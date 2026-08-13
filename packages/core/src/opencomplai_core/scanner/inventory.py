@@ -94,6 +94,10 @@ class RepoInventory:
     entries: list[InventoryEntry] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     skip_reasons: dict[str, int] = field(default_factory=dict)
+    #: Directory prefixes pruned by an .ocignore pattern. Kept separate from
+    #: skipped_paths because "we did not look inside this subtree" is a
+    #: different, larger claim than "we skipped this one file".
+    excluded_directories: list[str] = field(default_factory=list)
     limits_hit: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     limits: InventoryLimits = field(default_factory=InventoryLimits)
@@ -187,6 +191,15 @@ def build_repo_inventory(
         for d in dirnames:
             child_rel = f"{rel_dir}/{d}".strip("/") if rel_dir else d
             if _is_ignored(child_rel, patterns):
+                # SCAN-OCIGNORE (finding 84): record the prune. This branch
+                # used to `continue` with no trace, while the file-level branch
+                # below recorded a skip -- so excluding a whole directory was
+                # invisible, and a repo that excluded the exact tree under
+                # audit produced a clean report byte-identical to a genuinely
+                # AI-free one. An entire subtree is the *more* significant
+                # exclusion, not the less.
+                _record_skip(inventory, child_rel, "ignored_dir")
+                inventory.excluded_directories.append(child_rel)
                 continue
             child = Path(dirpath) / d
             if child.is_symlink() and not limits.allow_symlinks:

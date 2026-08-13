@@ -35,18 +35,32 @@ def _answer_entity(answers: dict[str, Any]) -> EntityType:
 
 
 def _determine_high_risk(answers: dict[str, Any]) -> bool:
-    hr1 = _answer_bool(answers, "hr1_annex_i")
+    # Art. 6(1) is conjunctive: an Annex I product is high-risk only if it has
+    # an AI safety component AND is required to undergo third-party conformity
+    # assessment. hr1 alone (self-certified Annex I product) does not trigger
+    # high-risk.
+    hr1 = _answer_bool(answers, "hr1_annex_i") and _answer_bool(
+        answers, "hr8_conformity_assessment"
+    )
     hr2 = _answer_bool(answers, "hr2_annex_iii")
     if not (hr1 or hr2):
         return False
-    if _answer_bool(answers, "hr3_art_6_3"):
-        return False
-    if _answer_bool(answers, "hr4_narrow_task"):
-        return False
-    if _answer_bool(answers, "hr5_no_significant_risk"):
-        return False
-    if _answer_bool(answers, "hr6_accessory"):
-        return False
+    # Art. 6(3) final subparagraph: an Annex III system that performs profiling
+    # of natural persons is always high-risk, overriding the (a)-(d) exceptions
+    # below. Must be evaluated ahead of them.
+    if hr2 and _answer_bool(answers, "hr7_profiling"):
+        return True
+    # The Art. 6(3)(a)-(d) exceptions are an Annex III derogation only (final
+    # subparagraph of Art. 6(3)); an Annex I trigger has no such exception.
+    if hr2 and not hr1:
+        if _answer_bool(answers, "hr3_art_6_3"):
+            return False
+        if _answer_bool(answers, "hr4_narrow_task"):
+            return False
+        if _answer_bool(answers, "hr5_no_significant_risk"):
+            return False
+        if _answer_bool(answers, "hr6_accessory"):
+            return False
     return True
 
 
@@ -253,14 +267,19 @@ def evaluate(session: CheckerSession) -> ComplianceCheckerResult:
         _entity_obligations(effective_entity, is_high_risk=is_high_risk)
     )
 
-    if _answer_bool(answers, "r4_transparency") and not is_high_risk:
+    if _answer_bool(answers, "r4_transparency"):
+        # Art. 50 disclosure duties apply in addition to high-risk obligations,
+        # not instead of them, so the obligation itself is never gated on
+        # is_high_risk. Only the "transparency_only" status — which communicates
+        # that this is the sole obligation tier — stays high-risk-gated.
         obligation_ids.append("transparency")
         path.append("r4:transparency")
-        non_literacy = [oid for oid in obligation_ids if oid != "ai_literacy"]
-        if obligation_ids == ["ai_literacy", "transparency"] or (
-            len(non_literacy) == 1 and non_literacy[0] == "transparency"
-        ):
-            status_ids.append("transparency_only")
+        if not is_high_risk:
+            non_literacy = [oid for oid in obligation_ids if oid != "ai_literacy"]
+            if obligation_ids == ["ai_literacy", "transparency"] or (
+                len(non_literacy) == 1 and non_literacy[0] == "transparency"
+            ):
+                status_ids.append("transparency_only")
 
     if (
         _answer_bool(answers, "r5_fria")

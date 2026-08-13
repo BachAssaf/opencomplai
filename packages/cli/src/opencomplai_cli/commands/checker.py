@@ -155,25 +155,48 @@ def run_interactive_wizard(*, skip_allowed: bool = True) -> CheckerSession | Non
         "Is the system a product with AI as safety component under Annex I harmonisation law?",
         default=False,
     )
+    if answers["hr1_annex_i"]:
+        answers["hr8_conformity_assessment"] = _confirm(
+            "Is that Annex I product required to undergo a third-party "
+            "conformity assessment by a notified body (Art 6(1)(b))?",
+            default=False,
+        )
     answers["hr2_annex_iii"] = _confirm(
         "Does the system fall within an Annex III high-risk use case?",
         default=False,
     )
-    if answers["hr1_annex_i"] or answers["hr2_annex_iii"]:
+    if answers["hr2_annex_iii"]:
+        answers["hr7_profiling"] = _confirm(
+            "Does the system perform profiling of natural persons (automated "
+            "processing of personal data to evaluate, analyse, or predict "
+            "aspects such as behaviour, preferences, location, or performance)?",
+            default=False,
+        )
+    # The Art. 6(3)(a)-(d) exceptions are an Annex III derogation only; an
+    # Annex I trigger (safety component + conformity assessment) has none.
+    hr1_effective = answers["hr1_annex_i"] and answers.get(
+        "hr8_conformity_assessment", False
+    )
+    if answers["hr2_annex_iii"] and not hr1_effective:
         answers["hr3_art_6_3"] = _confirm(
-            "Does Article 6(3) apply (safety component required for product conformity)?",
+            "Is the AI system intended only to improve the result of a "
+            "previously completed human activity (Art 6(3)(b))?",
             default=False,
         )
         answers["hr4_narrow_task"] = _confirm(
-            "Is the AI intended only for a narrow procedural task (Art 6(3) exception)?",
+            "Is the AI intended only for a narrow procedural task (Art 6(3)(a))?",
             default=False,
         )
         answers["hr5_no_significant_risk"] = _confirm(
-            "Does the system NOT pose significant risk to health, safety, or fundamental rights?",
+            "Is the AI system intended only to detect decision-making patterns "
+            "or deviations from prior decisions, without replacing or "
+            "influencing the prior human assessment and without proper human "
+            "review (Art 6(3)(c))?",
             default=False,
         )
         answers["hr6_accessory"] = _confirm(
-            "Is the system purely accessory to the relevant human decision (Art 6(3))?",
+            "Is the AI system intended only to perform a preparatory task for "
+            "an assessment relevant to the Annex III use case (Art 6(3)(d))?",
             default=False,
         )
 
@@ -199,6 +222,7 @@ def run_interactive_wizard(*, skip_allowed: bool = True) -> CheckerSession | Non
         default=False,
     )
     if answers["s1_gpai"]:
+        _show_help("gpai_systemic_risk_threshold")
         answers["s1_gpai_systemic_risk"] = _confirm(
             "Does the GPAI model have systemic risk (high impact capabilities)?",
             default=False,

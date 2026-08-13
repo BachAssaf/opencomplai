@@ -1,20 +1,18 @@
 """Manifest discrepancy HITL enqueue tests."""
 
+import pytest
 from opencomplai_core.models import ReviewReason
-from opencomplai_risk_engine.review_queue import (
-    _REVIEW_CONTEXTS,
-    _REVIEW_ITEMS,
-    enqueue_manifest_discrepancy,
-    get_review_context,
-)
+from opencomplai_risk_engine import review_queue
+from opencomplai_risk_engine.review_queue import enqueue_manifest_discrepancy
 
 
-def setup_function():
-    _REVIEW_ITEMS.clear()
-    _REVIEW_CONTEXTS.clear()
+@pytest.fixture(autouse=True)
+def _clear_queue(fake_vault):
+    yield
+    fake_vault.clear()
 
 
-def test_major_discrepancy_enqueues_manifest_discrepancy():
+def test_major_discrepancy_enqueues_manifest_discrepancy(fake_vault):
     item = enqueue_manifest_discrepancy(
         tenant_id="t1",
         system_id="sys-1",
@@ -26,13 +24,13 @@ def test_major_discrepancy_enqueues_manifest_discrepancy():
         detector_ids=["DET_BIOMETRIC_V1"],
     )
     assert item.reason == ReviewReason.MANIFEST_DISCREPANCY
-    ctx = get_review_context(item.context_ref)
+    ctx = review_queue.get_review_context(item.context_ref)
     assert ctx is not None
     assert ctx.aggregate_counts["discrepancy_count"] == 1
     assert "import face_recognition" not in ctx.model_dump_json()
 
 
-def test_enqueue_idempotent_on_retry():
+def test_enqueue_idempotent_on_retry(fake_vault):
     kwargs = {
         "tenant_id": "t1",
         "system_id": "sys-1",

@@ -25,7 +25,7 @@ export const proRoutes: FastifyPluginAsync = async (app): Promise<void> => {
     ): Promise<void> => {
       await proxyToService(
         EVIDENCE_VAULT_URL,
-        `/v1/pro/badges/verify/${req.params.badgeId}`,
+        `/v1/pro/badges/verify/${encodeURIComponent(req.params.badgeId)}`,
         'GET',
         undefined,
         reply,
@@ -42,7 +42,7 @@ export const proRoutes: FastifyPluginAsync = async (app): Promise<void> => {
     ): Promise<void> => {
       await proxyToService(
         EVIDENCE_VAULT_URL,
-        `/v1/pro/badges/${req.params.badgeId}/svg`,
+        `/v1/pro/badges/${encodeURIComponent(req.params.badgeId)}/svg`,
         'GET',
         undefined,
         reply,

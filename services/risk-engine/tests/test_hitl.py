@@ -1,30 +1,32 @@
 """Tests for the HITL orchestrator (REQ-HITL-001, PRD Section 8)."""
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from opencomplai_risk_engine import main as risk_main
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_risk_engine.main import app
 
 
 @pytest.fixture(autouse=True)
-def _vault_ok_and_clear_cache():
-    risk_main._ACCEPTED_OVERRIDES.clear()
+def _vault_ok_and_clear_cache(fake_vault):
     with patch(
         "opencomplai_risk_engine.main._record_hitl_event",
         new_callable=AsyncMock,
         return_value="evt_mock_vault",
     ):
         yield
-    risk_main._ACCEPTED_OVERRIDES.clear()
+    fake_vault.clear()
 
 
 @pytest.mark.asyncio
 async def test_override_empty_rationale_returns_422():
     """REQ-HITL-001: override without rationale must be rejected."""
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r = await client.post(
             "/v1/hitl/overrides",
@@ -43,7 +45,9 @@ async def test_override_empty_rationale_returns_422():
 async def test_override_whitespace_only_rationale_returns_422():
     """Whitespace-only rationale must also be rejected."""
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r = await client.post(
             "/v1/hitl/overrides",
@@ -60,7 +64,9 @@ async def test_override_whitespace_only_rationale_returns_422():
 @pytest.mark.asyncio
 async def test_override_valid_rationale_returns_201():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r = await client.post(
             "/v1/hitl/overrides",
@@ -82,7 +88,9 @@ async def test_override_valid_rationale_returns_201():
 @pytest.mark.asyncio
 async def test_override_dual_approval_pending():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r = await client.post(
             "/v1/hitl/overrides",
@@ -108,7 +116,9 @@ async def test_override_rationale_hash_is_deterministic():
         "decision": "approved",
     }
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r1 = await client.post("/v1/hitl/overrides", json=payload)
         r2 = await client.post("/v1/hitl/overrides", json=payload)

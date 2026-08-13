@@ -23,6 +23,10 @@ PRIVATE_DIRS=(
   "compliance-reports"
   ".claude"
   ".github"             # all enterprise CI/issue templates — not published
+  "PLAN"                # internal execution journal (RUN-LOG/STATUS/roadmap
+                         # for the SaaS build-out) — not *.plan.md, so it was
+                         # missed by that glob; found leaking during the
+                         # v0.3.0 release sync rehearsal (49 tracked files).
 )
 
 # --- Private files (exact, root-relative paths) -----------------------------

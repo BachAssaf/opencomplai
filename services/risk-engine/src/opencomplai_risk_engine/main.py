@@ -12,7 +12,7 @@ import json
 import os
 import urllib.request as urlreq
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from opencomplai_core.engine import assess
 from opencomplai_core.models import (
@@ -20,11 +20,14 @@ from opencomplai_core.models import (
     ModelMetadata,
     SystemManifest,
 )
+from opencomplai_core.service_auth import load_shared_secret, mint_service_token
 from opencomplai_core.telemetry import (
     configure_telemetry,
     metrics_response,
 )
 from pydantic import BaseModel, Field
+
+from opencomplai_risk_engine.service_auth_dependency import require_service_principal
 
 try:
     from prometheus_client import Counter as _Counter
@@ -54,9 +57,6 @@ except ImportError:
 
 TENANT_ID = os.environ.get("TENANT_ID", "default")
 
-# Idempotency cache: idempotency_key -> (payload_fingerprint, OverrideResponse)
-_ACCEPTED_OVERRIDES: dict[str, tuple[str, dict]] = {}
-
 EVIDENCE_VAULT_URL = os.environ.get("EVIDENCE_VAULT_URL", "http://evidence-vault:8002")
 
 PORT = int(os.environ.get("PORT", "8001"))
@@ -75,6 +75,10 @@ configure_telemetry("risk-engine")
 
 # The public docs-site checker widget calls POST /v1/checker/email directly
 # from the browser — the only cross-origin caller of this service today.
+# CORSMiddleware applies to the whole ASGI app once added via app.add_middleware
+# with no way to scope it to one router, so scoping is done by path prefix
+# inside the middleware itself: every other route requires a service token and
+# has no browser caller to permit CORS for.
 _CHECKER_CORS_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
@@ -83,8 +87,20 @@ _CHECKER_CORS_ORIGINS = [
     ).split(",")
     if origin.strip()
 ]
+
+
+class _CheckerScopedCORSMiddleware(CORSMiddleware):
+    """CORSMiddleware that only processes requests under /v1/checker/*."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and not scope["path"].startswith("/v1/checker"):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 app.add_middleware(
-    CORSMiddleware,
+    _CheckerScopedCORSMiddleware,
     allow_origins=_CHECKER_CORS_ORIGINS,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
@@ -95,6 +111,11 @@ from opencomplai_risk_engine.checker_routes import (  # noqa: E402 — imported 
 )
 
 app.include_router(checker_router)
+
+# Every other /v1/* route requires a valid internal service token
+# (SEC-SERVICE-AUTH) — only /health, /metrics, and /v1/checker/* (public by
+# design, CORS-scoped above) stay reachable without one.
+router = APIRouter(dependencies=[Depends(require_service_principal)])
 
 
 class ManifestValidateRequest(BaseModel):
@@ -159,7 +180,7 @@ async def metrics():
     return response
 
 
-@app.post("/v1/manifests/validate")
+@router.post("/v1/manifests/validate")
 async def validate_manifest(request: ManifestValidateRequest) -> dict:
     try:
         manifest = SystemManifest(
@@ -174,7 +195,7 @@ async def validate_manifest(request: ManifestValidateRequest) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/v1/risk/classify", response_model=RiskClassifyResponse)
+@router.post("/v1/risk/classify", response_model=RiskClassifyResponse)
 async def classify_risk(request: RiskClassifyRequest) -> RiskClassifyResponse:
     answers: dict = {}
     if "profiling" in [f.lower() for f in request.features]:
@@ -257,6 +278,80 @@ class OverrideResponse(BaseModel):
     vault_event_id: str | None = None
 
 
+def _evidence_vault_headers() -> dict[str, str]:
+    """
+    Signed service-token header for calls to evidence-vault (SEC-SERVICE-AUTH),
+    plus X-Tenant-Id (TEN-VAULT) so evidence-vault's RLS fence scopes ledger
+    writes to this deployment's tenant. risk-engine is still single-tenant-
+    per-deployment (TENANT_ID env var, not per-request) — PERSIST-RISK is the
+    epic that moves the review queue itself to real per-request tenancy; this
+    only forwards the deployment's own tenant to the vault it writes to.
+    """
+    headers = {"Content-Type": "application/json", "X-Tenant-Id": TENANT_ID}
+    secret = load_shared_secret()
+    if secret is not None:
+        token = mint_service_token("risk-engine", secret)
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _vault_request(method: str, path: str, body: dict | None = None) -> dict | None:
+    """Non-blocking GET/POST against evidence-vault's HITL persistence routes."""
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urlreq.Request(
+        f"{EVIDENCE_VAULT_URL}{path}",
+        data=data,
+        headers=_evidence_vault_headers(),
+        method=method,
+    )
+    try:
+        with urlreq.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def _lookup_accepted_override(idempotency_key: str) -> tuple[str, dict] | None:
+    """
+    Durable override-idempotency lookup (PERSIST-RISK). Returns None both on a
+    genuine cache miss and on vault unavailability — submit_override's
+    subsequent fail-closed ledger write is what actually protects correctness
+    when the vault is down; a lookup miss here at worst re-runs an override
+    that would otherwise have been served from cache.
+    """
+    result = _vault_request("GET", f"/v1/hitl/overrides/{idempotency_key}")
+    if result is None or not result.get("found"):
+        return None
+    return result["payload_fingerprint"], result["response_json"]
+
+
+def _store_accepted_override(
+    idempotency_key: str, payload_fingerprint: str, response_json: dict
+) -> None:
+    _vault_request(
+        "POST",
+        "/v1/hitl/overrides",
+        {
+            "idempotency_key": idempotency_key,
+            "payload_fingerprint": payload_fingerprint,
+            "response_json": response_json,
+        },
+    )
+
+
+def _lookup_completed_eval(run_key: str) -> dict | None:
+    result = _vault_request("GET", f"/v1/evals/cache/{run_key}")
+    if result is None or not result.get("found"):
+        return None
+    return result["result_json"]
+
+
+def _store_completed_eval(run_key: str, result_json: dict) -> None:
+    _vault_request(
+        "POST", "/v1/evals/cache", {"eval_run_id": run_key, "result_json": result_json}
+    )
+
+
 async def _record_hitl_event(
     event_type: str, payload: dict, actor_id: str
 ) -> str | None:
@@ -272,7 +367,7 @@ async def _record_hitl_event(
     req = urlreq.Request(
         f"{EVIDENCE_VAULT_URL}/v1/evidence/events",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=_evidence_vault_headers(),
         method="POST",
     )
     try:
@@ -348,7 +443,7 @@ def _override_payload_fingerprint(
     ).hexdigest()
 
 
-@app.post("/v1/hitl/overrides", response_model=OverrideResponse, status_code=201)
+@router.post("/v1/hitl/overrides", response_model=OverrideResponse, status_code=201)
 async def submit_override(request: OverrideRequest) -> OverrideResponse:
     """
     Submit a HITL override action (REQ-HITL-001).
@@ -380,7 +475,7 @@ async def submit_override(request: OverrideRequest) -> OverrideResponse:
         request.requires_dual_approval,
     )
 
-    cached = _ACCEPTED_OVERRIDES.get(idempotency_key)
+    cached = _lookup_accepted_override(idempotency_key)
     if cached is not None:
         cached_fp, cached_body = cached
         if cached_fp != payload_fp:
@@ -430,10 +525,7 @@ async def submit_override(request: OverrideRequest) -> OverrideResponse:
         status=status,
         vault_event_id=vault_event_id,
     )
-    _ACCEPTED_OVERRIDES[idempotency_key] = (
-        payload_fp,
-        response.model_dump(),
-    )
+    _store_accepted_override(idempotency_key, payload_fp, response.model_dump())
     return response
 
 
@@ -443,10 +535,7 @@ class EvalRunRequest(BaseModel):
     sample_set: dict
 
 
-_COMPLETED_EVALS: dict[str, dict] = {}
-
-
-@app.post("/v1/evals/run")
+@router.post("/v1/evals/run")
 async def run_evals_endpoint(request: EvalRunRequest) -> dict:
     """Run safety, bias, and data-leakage evaluators (Workstream A)."""
     from opencomplai_core.eval_engine import (
@@ -480,8 +569,9 @@ async def run_evals_endpoint(request: EvalRunRequest) -> dict:
         policy_hash,
     )
 
-    if run_key in _COMPLETED_EVALS:
-        return _COMPLETED_EVALS[run_key]
+    cached_eval = _lookup_completed_eval(run_key)
+    if cached_eval is not None:
+        return cached_eval
 
     try:
         report = run_evals(request.system_id, request.commit_ref, sample_set)
@@ -544,7 +634,7 @@ async def run_evals_endpoint(request: EvalRunRequest) -> dict:
 
     body = report.model_dump()
     body["eval_run_id"] = run_key
-    _COMPLETED_EVALS[run_key] = body
+    _store_completed_eval(run_key, body)
     return body
 
 
@@ -553,7 +643,7 @@ async def run_evals_endpoint(request: EvalRunRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/v1/hitl/queue")
+@router.get("/v1/hitl/queue")
 async def list_hitl_queue(
     state: str | None = None,
     assigned_to: str | None = None,
@@ -567,7 +657,7 @@ async def list_hitl_queue(
     return {"items": [i.model_dump() for i in items]}
 
 
-@app.get("/v1/hitl/queue/{review_id}")
+@router.get("/v1/hitl/queue/{review_id}")
 async def get_hitl_queue_item(review_id: str) -> dict:
     from opencomplai_risk_engine.review_queue import (
         get_review_context,
@@ -588,7 +678,7 @@ class AssignReviewRequest(BaseModel):
     reviewer_id: str
 
 
-@app.post("/v1/hitl/queue/{review_id}/assign")
+@router.post("/v1/hitl/queue/{review_id}/assign")
 async def assign_hitl_queue_item(review_id: str, request: AssignReviewRequest) -> dict:
     from opencomplai_risk_engine.review_queue import assign_review
 
@@ -606,7 +696,7 @@ class DecideReviewRequest(BaseModel):
     idempotency_key: str | None = None
 
 
-@app.post("/v1/hitl/queue/{review_id}/decide", status_code=201)
+@router.post("/v1/hitl/queue/{review_id}/decide", status_code=201)
 async def decide_hitl_queue_item(review_id: str, request: DecideReviewRequest) -> dict:
     from opencomplai_risk_engine.review_queue import get_review_item, mark_decided
 
@@ -637,7 +727,7 @@ class VerifyClaimRequest(BaseModel):
     system_id: str | None = None
 
 
-@app.post("/v1/verify/claims")
+@router.post("/v1/verify/claims")
 async def verify_claim(request: VerifyClaimRequest) -> dict:
     """
     Resolve a claim to exactly one terminal outcome (REQ-GTVG-001).
@@ -703,3 +793,6 @@ async def verify_claim(request: VerifyClaimRequest) -> dict:
         response["alert_id"] = alert.alert_id
         response["alert_severity"] = alert.severity.value
     return response
+
+
+app.include_router(router)

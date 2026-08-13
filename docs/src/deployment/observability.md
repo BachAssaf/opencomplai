@@ -80,6 +80,71 @@ The provisioned `Opencomplai — Compliance Health` dashboard includes:
 
 ---
 
+## Health Endpoints
+
+Three distinct endpoints answer three different questions. Pointing a monitor at
+the wrong one is the most common way to get misleading signals here.
+
+| Endpoint | Auth | Answers | Use for |
+|---|---|---|---|
+| `GET /health` (gateway-api) | none | Is the gateway process alive? Contacts nothing. | Kubernetes liveness/readiness, load-balancer checks |
+| `GET /v1/status` | required | Is the *system* healthy? Probes every downstream. | Status pages, dashboards, human diagnosis |
+| `GET /metrics` (each service) | none | Prometheus time series | Scraping |
+
+### `GET /v1/status`
+
+Probes `risk-engine`, `evidence-vault`, `doc-generator`, and `egress-proxy`
+concurrently and reports each one. Results are cached briefly
+(`STATUS_CACHE_TTL_MS`, default 5000) so polling does not fan out to the
+backend on every request.
+
+```json
+{
+  "status": "degraded",
+  "service": "gateway-api",
+  "version": "0.1.0-dev",
+  "checked_at": "2026-07-30T20:35:00Z",
+  "services": {
+    "risk-engine":    { "status": "ok", "latency_ms": 12, "version": "0.2.0" },
+    "evidence-vault": { "status": "ok", "latency_ms": 9,  "version": "0.2.0" },
+    "doc-generator":  { "status": "unreachable", "latency_ms": 2000, "reason": "timeout" },
+    "egress-proxy":   { "status": "ok", "latency_ms": 7 }
+  }
+}
+```
+
+Per-service `status` is one of `ok`, `degraded` (answered, but reported itself
+unhealthy), or `unreachable` (no answer). `reason` is one of `timeout`,
+`connection_error`, or `http_error`.
+
+**Monitor this URL, with the `strict` flag:**
+
+```
+GET /v1/status?strict=1
+```
+
+By default `/v1/status` returns **200 even when degraded** — the request
+succeeded and the body is an accurate answer, and many clients discard the body
+of a non-2xx response, which would throw away the per-service detail exactly
+when it matters. `?strict=1` returns **503 whenever anything is not `ok`**, so a
+monitor that only inspects the status code still sees the problem. The body is
+identical either way.
+
+The failure mode of the default is silent green: a monitor configured *without*
+`?strict=1` reports healthy while the system is degraded. Use the strict URL for
+automated monitoring and the plain URL for dashboards that render the detail.
+
+!!! warning "Do not use `/v1/status` as a liveness probe"
+    It reflects downstream state, so a single dead backend would restart a
+    perfectly healthy gateway. Liveness is `GET /health`, which contacts nothing.
+
+| Variable | Default | Description |
+|---|---|---|
+| `STATUS_CHECK_TIMEOUT_MS` | `2000` | Per-downstream probe timeout. Probes run concurrently, so this bounds the whole request. |
+| `STATUS_CACHE_TTL_MS` | `5000` | How long an aggregate result is reused before re-probing. |
+
+---
+
 ## Alert Routing
 
 For production deployments, configure alert routing in Grafana or your SIEM:

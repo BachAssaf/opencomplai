@@ -76,15 +76,39 @@ services:
       context: ../..
       dockerfile: infra/docker/risk-engine.Dockerfile
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-opencomplai}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-opencomplai}
-      REDIS_URL: redis://redis:6379
+      # No DATABASE_URL/REDIS_URL: risk-engine holds no state of its own —
+      # the HITL review queue, override-idempotency cache, and eval-run
+      # cache all persist through evidence-vault's HTTP API (PERSIST-RISK),
+      # which already owns the one Postgres+RLS deployment in this stack
+      # (TEN-VAULT). Previously provisioned but unused.
       PORT: "8001"
+      EVIDENCE_VAULT_URL: http://evidence-vault:8002
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET is required}
+      # Optional (DOS-LIMITS). Trusted reverse-proxy hop count for the public
+      # /v1/checker/* rate limiter's X-Forwarded-For resolution — the docs
+      # widget calls this service directly (no gateway-api in that path), but
+      # a deployment may still sit behind a proxy/LB/CDN. Defaults to 0
+      # (trust nothing, key on the raw socket peer) so an unconfigured
+      # deployment can't have its rate limit bypassed by a spoofed header; set
+      # to the number of trusted proxy hops in front of risk-engine if any.
+      OPENCOMPLAI_TRUSTED_PROXY_HOPS: ${OPENCOMPLAI_TRUSTED_PROXY_HOPS:-0}
+      # Optional (OPS-HEALTH). SMTP for the checker's "email a copy" feature
+      # (POST /v1/checker/email). OPENCOMPLAI_SMTP_HOST is the switch: unset
+      # means the endpoint returns 503 MAILER_NOT_CONFIGURED and nothing else
+      # is affected — the checker itself runs entirely in the browser. Note
+      # that configuring SMTP alone does NOT enable the button on the public
+      # docs site; that also needs OCOC_RISK_ENGINE_URL and a CSP connect-src
+      # entry. See docs/src/deployment/configuration.md.
+      OPENCOMPLAI_SMTP_HOST: ${OPENCOMPLAI_SMTP_HOST:-}
+      OPENCOMPLAI_SMTP_PORT: ${OPENCOMPLAI_SMTP_PORT:-587}
+      OPENCOMPLAI_SMTP_USERNAME: ${OPENCOMPLAI_SMTP_USERNAME:-}
+      OPENCOMPLAI_SMTP_PASSWORD: ${OPENCOMPLAI_SMTP_PASSWORD:-}
+      OPENCOMPLAI_SMTP_FROM_ADDRESS: ${OPENCOMPLAI_SMTP_FROM_ADDRESS:-noreply@opencomplai.com}
+      OPENCOMPLAI_SMTP_USE_TLS: ${OPENCOMPLAI_SMTP_USE_TLS:-true}
     networks:
       - internal
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
+      evidence-vault:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
@@ -110,6 +134,8 @@ services:
       EVIDENCE_DATA_DIR: /data/evidence
       KEY_DATA_DIR: /data/keys
       PORT: "8002"
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET is required}
+      OSS_BADGE_PUBLIC_KEY_PATH: ${OSS_BADGE_PUBLIC_KEY_PATH:-}
     volumes:
       - evidence_data:/data/evidence
       - key_data:/data/keys
@@ -137,6 +163,7 @@ services:
     environment:
       EVIDENCE_VAULT_URL: http://evidence-vault:8002
       PORT: "8003"
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET is required}
     networks:
       - internal
     depends_on:
@@ -166,6 +193,7 @@ services:
     environment:
       ALLOWED_DESTINATIONS: ${EGRESS_ALLOWED_DESTINATIONS:-}
       PORT: "8004"
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET is required}
     networks:
       - internal
       - external
@@ -203,6 +231,10 @@ services:
       OPENCOMPLAI_API_KEY: ${OPENCOMPLAI_API_KEY:-}
       OPENCOMPLAI_AUTH_DISABLED: ${OPENCOMPLAI_AUTH_DISABLED:-}
       OIDC_JWKS_URI: ${OIDC_JWKS_URI:-}
+      # gateway-api is the sole authenticated caller of the four internal
+      # Python services below — it mints a signed service token per outbound
+      # call (SEC-SERVICE-AUTH). Same shared secret as their INTERNAL_SERVICE_TOKEN_SECRET.
+      INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET is required}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     networks:

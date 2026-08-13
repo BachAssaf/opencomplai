@@ -62,6 +62,30 @@ _CONFIG_FILE = _OPENCOMPLAI_DIR / "config.yaml"
 _SIGNING_PUB = _OPENCOMPLAI_DIR / "signing.pub"
 _EGRESS_ALLOWLIST = _OPENCOMPLAI_DIR / "egress_allowlist.json"
 _LEDGER_FILE = _OPENCOMPLAI_DIR / "ledger.jsonl"
+_CLIENT_SECRET_FILE = _OPENCOMPLAI_DIR / "client.secret"
+
+
+def _write_client_secret(raw_secret: str) -> None:
+    """
+    Persist the plaintext client_secret received once from /enroll. Stored
+    as a dedicated file (mirroring signing.key/signing.pub's separateness
+    from config.yaml's non-secret flat scalars), chmod 0600 where the
+    platform supports it — a no-op on Windows, where this permission model
+    doesn't apply the same way.
+    """
+    _OPENCOMPLAI_DIR.mkdir(parents=True, exist_ok=True)
+    _CLIENT_SECRET_FILE.write_text(raw_secret)
+    try:
+        os.chmod(_CLIENT_SECRET_FILE, 0o600)
+    except (OSError, NotImplementedError):
+        pass
+
+
+def _read_client_secret() -> str | None:
+    if not _CLIENT_SECRET_FILE.exists():
+        return None
+    secret = _CLIENT_SECRET_FILE.read_text().strip()
+    return secret or None
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +266,17 @@ def enroll(
     audit_event_hash = data.get("audit_event_hash", "")
     dashboard_url_from_api = data.get("dashboard_url", base_url)
 
+    # --- Persist OIDC client-credentials pair (AUTH-SAAS) ---
+    # /enroll is the only place these are ever returned; client_id is not
+    # secret (like install_id) and lives in config.yaml, client_secret gets
+    # its own file since it must never be handed back a second time.
+    client_id = data.get("client_id", "")
+    client_secret = data.get("client_secret", "")
+    if client_id and client_secret:
+        cfg["client_id"] = client_id
+        _write_config(cfg)
+        _write_client_secret(client_secret)
+
     # --- Write EgressConsent ledger event (OSS-side immutable ledger) ---
     from datetime import UTC, datetime
 
@@ -269,6 +304,9 @@ def enroll(
     _console.print(f"  tenant_id:        {tenant}")
     _console.print(f"  install_id:       {install_id}")
     _console.print(f"  audit_event_hash: {audit_event_hash}")
+    if client_id and client_secret:
+        _console.print(f"  client_id:        {client_id}")
+        _console.print(f"  client_secret:    saved to {_CLIENT_SECRET_FILE}")
     _console.print(f"\nDashboard: {dashboard_url_from_api}")
     _console.print(
         "\nNext step: run [bold]opencomplai check --sign[/bold] to emit your first signed artifact."
@@ -307,6 +345,18 @@ def withdraw(
     ).rstrip("/")
 
     # --- Notify dashboard if URL is available ---
+    # Best-effort and non-fatal by design (an offline install can still clear
+    # its own local state) — but a >=400 response is not the same as being
+    # unreachable: the dashboard *processed* the request and refused it, so
+    # egress consent almost certainly stays active server-side. That case
+    # gets its own louder message below rather than folding into the local
+    # "Withdrawal complete" line, which would otherwise claim a success that
+    # did not happen remotely (admin-api's /v1/admin/withdraw requires an
+    # authenticated, tenant-scoped service JWT as of SEC-2 — this CLI does
+    # not yet mint one, so every call currently gets 401; see HANDOFF.md).
+    # Vacuously true when no dashboard URL is configured at all — a purely
+    # local install has no remote consent state to fall out of sync with.
+    dashboard_notified = not base_url
     if base_url:
         try:
             status, data = _post(
@@ -315,9 +365,12 @@ def withdraw(
             )
             if status >= 400:
                 _err_console.print(
-                    f"[yellow]Warning:[/yellow] dashboard withdraw call returned {status}: "
-                    f"{data.get('message', data)}"
+                    f"[red]Error:[/red] dashboard rejected the withdraw request "
+                    f"({status}: {data.get('message', data)}) — egress consent was "
+                    "NOT revoked server-side. Clearing local state only."
                 )
+            else:
+                dashboard_notified = True
         except ConnectionError as exc:
             _err_console.print(
                 f"[yellow]Warning:[/yellow] could not reach dashboard: {exc}"
@@ -342,9 +395,16 @@ def withdraw(
     _write_egress_allowlist(allowlist)
 
     if removed:
-        _console.print(
-            f"[green]Withdrawal complete.[/green] Egress allowlist entry removed for tenant {tenant}."
-        )
+        if dashboard_notified:
+            _console.print(
+                f"[green]Withdrawal complete.[/green] Egress allowlist entry removed for tenant {tenant}."
+            )
+        else:
+            _console.print(
+                f"[yellow]Local withdrawal complete[/yellow] — egress allowlist entry removed "
+                f"for tenant {tenant}, but the dashboard was not notified (see error above). "
+                "Server-side egress consent likely remains active."
+            )
     else:
         _console.print(
             f"[dim]No egress allowlist entry found for tenant {tenant} — nothing to remove.[/dim]"

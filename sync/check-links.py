@@ -5,12 +5,25 @@ import re
 from pathlib import Path
 
 
+#: Directories whose markdown we do not own and must not gate CI on. The docs
+#: build runs `npm ci` in docs/checker-widget before the link check, so without
+#: this the walk picks up vendored READMEs — ~24 of them carry relative links
+#: to files not shipped in the published package, which is not our defect.
+_EXCLUDED_DIRS = frozenset({"node_modules", ".venv", "site", "__pycache__"})
+
+
+def _is_excluded(path: Path) -> bool:
+    return any(part in _EXCLUDED_DIRS for part in path.parts)
+
+
 def check_internal_links():
     """Validate internal markdown links."""
     docs_dir = Path("docs")
     errors = []
 
     for md_file in docs_dir.rglob("*.md"):
+        if _is_excluded(md_file):
+            continue
         try:
             content = md_file.read_text(encoding="utf-8", errors="ignore")
         except Exception:

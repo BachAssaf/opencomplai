@@ -31,24 +31,32 @@
     "label": "Is the system a product with AI as safety component under Annex I harmonisation law?",
     "section": "Risk classification"
   },
+  "hr8_conformity_assessment": {
+    "label": "Is that Annex I product required to undergo a third-party conformity assessment by a notified body (Art 6(1)(b))?",
+    "section": "Risk classification"
+  },
   "hr2_annex_iii": {
     "label": "Does the system fall within an Annex III high-risk use case?",
     "section": "Risk classification"
   },
+  "hr7_profiling": {
+    "label": "Does the system perform profiling of natural persons (automated processing of personal data to evaluate, analyse, or predict aspects such as behaviour, preferences, location, or performance)?",
+    "section": "Risk classification"
+  },
   "hr3_art_6_3": {
-    "label": "Does Article 6(3) apply (safety component required for product conformity)?",
+    "label": "Is the AI system intended only to improve the result of a previously completed human activity (Art 6(3)(b))?",
     "section": "Risk classification"
   },
   "hr4_narrow_task": {
-    "label": "Is the AI intended only for a narrow procedural task (Art 6(3) exception)?",
+    "label": "Is the AI intended only for a narrow procedural task (Art 6(3)(a))?",
     "section": "Risk classification"
   },
   "hr5_no_significant_risk": {
-    "label": "Does the system NOT pose significant risk to health, safety, or fundamental rights?",
+    "label": "Is the AI system intended only to detect decision-making patterns or deviations from prior decisions, without replacing or influencing the prior human assessment and without proper human review (Art 6(3)(c))?",
     "section": "Risk classification"
   },
   "hr6_accessory": {
-    "label": "Is the system purely accessory to the relevant human decision (Art 6(3))?",
+    "label": "Is the AI system intended only to perform a preparatory task for an assessment relevant to the Annex III use case (Art 6(3)(d))?",
     "section": "Risk classification"
   },
   "s1_in_scope": {

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 
 from opencomplai_core.models import AssessmentInput, RuleResult
 
@@ -71,6 +72,14 @@ def _keyword_variants(keyword: str) -> list[str]:
 
 _PACK_TOKEN_DENYLIST: frozenset[str] = frozenset(
     {
+        # Generic engineering/process vocabulary. These are long enough to
+        # clear _SOLO_TOKEN_MIN_LEN but carry no Annex III signal, so they are
+        # excluded from expansion rather than relied on to be short.
+        "performance",
+        "testing",
+        "sorting",
+        "pipeline",
+        "pipelines",
         "support",
         "system",
         "systems",
@@ -138,7 +147,17 @@ _PACK_TOKEN_DENYLIST: frozenset[str] = frozenset(
 
 
 def _expand_pack_phrase(phrase: str) -> list[str]:
-    """Expand a pack phrase into matchable forms (full phrase, suffix-stripped, tokens)."""
+    """Expand a pack phrase into matchable forms (full phrase, suffix-stripped, bigrams, terms).
+
+    Bare single words ARE emitted, but they never fire a category on their
+    own — `_match_pack_keywords` requires two distinct ones to co-occur.
+    Dropping them entirely (the previous approach) silently lost the
+    distinctive Annex III vocabulary that only ever appears as one word:
+    "recidivism", "microtargeting", "ethnicity". Suppressing the vocabulary
+    is a false-negative risk, which for a compliance gate is worse than the
+    false positives it was meant to avoid; the co-occurrence requirement is
+    what makes restoring it safe.
+    """
     normalized = normalize_text(phrase.replace("_", " "))
     expanded: list[str] = [normalized]
     expanded.extend(_keyword_variants(normalized))
@@ -153,34 +172,166 @@ def _expand_pack_phrase(phrase: str) -> list[str]:
                 and b not in _PACK_TOKEN_DENYLIST
             ):
                 expanded.append(f"{a} {b}")
-    for word in words:
-        if len(word) >= 6 and word not in _PACK_TOKEN_DENYLIST:
-            expanded.append(word)
+        for word in words:
+            if len(word) >= 6 and word not in _PACK_TOKEN_DENYLIST:
+                expanded.append(word)
     return expanded
 
 
-def _build_annex_iii_categories() -> dict[str, frozenset[str]]:
-    """Build Annex III keyword sets from the knowledge pack (single source of truth)."""
-    result: dict[str, list[str]] = {}
-    try:
-        from opencomplai_ai.knowledge.annex_iii import ANNEX_III
+def _matches_keyword(keyword: str, use_case: str) -> bool:
+    """True when `keyword` occurs in `use_case` on whole-token boundaries.
 
-        for entry in ANNEX_III:
-            area_name = _PACK_AREA_NAME_REMAP.get(entry.area_name, entry.area_name)
-            if area_name not in result:
-                result[area_name] = []
-            result[area_name].append(area_name.replace("_", " "))
-            for phrase in (entry.title, *entry.keywords):
-                result[area_name].extend(_expand_pack_phrase(phrase))
-            for signal in entry.code_signals:
-                normalized = normalize_text(signal.replace("_", " "))
-                result[area_name].append(normalized)
-                for word in normalized.split():
-                    if len(word) >= 7 and word not in _PACK_TOKEN_DENYLIST:
-                        result[area_name].append(word)
-    except ImportError:
-        pass
-    return {k: frozenset(v) for k, v in result.items()}
+    Plain substring matching let short pack tokens fire inside unrelated
+    words — "fer" (facial emotion recognition) matched "in-FER-ence" and
+    "cad" matched "cas-CAD-e" — classifying ordinary engineering work as
+    high-risk. Both sides are already normalize_text'd, so anchoring on
+    word characters is sufficient.
+
+    Kept as the single-keyword reference implementation, used directly by
+    the tests pinning matching semantics; _CompiledKeywordMatcher below is
+    the whole-set equivalent used by the rule classes, bounded by text
+    length rather than by the number of keywords in the set.
+    """
+    kw = normalize_text(keyword)
+    if not kw:
+        return False
+    # A trailing plural is still the same term: the pack stores "applicant"
+    # and "examination" while use cases say "applicants" and "examinations".
+    # Substring matching used to absorb this for free; word boundaries do not.
+    return re.search(rf"(?<!\w){re.escape(kw)}(?:e?s)?(?!\w)", use_case) is not None
+
+
+class _CompiledKeywordMatcher:
+    """Precomputed matcher for a fixed keyword set (DOS-LIMITS).
+
+    AnnexIIIClassifierRule/UnacceptableRiskRule/ProfilingDetectionRule each
+    used to test every keyword in their set against `use_case` with its own
+    `re.search` call — O(keywords * len(use_case)) per request. This tokenizes
+    `use_case` into words once and does a dict lookup per word-n-gram, giving
+    the same match set in O(len(use_case) * max_phrase_words) instead — a
+    small constant (longest pack phrase is 11 words), not the keyword count.
+
+    Matching semantics are byte-for-byte those of `_matches_keyword` called
+    once per keyword: every keyword is tested independently against the full
+    text, word-boundary anchored, with an optional trailing `e?s` on the
+    pluralizable form. This independence matters — "credit", "scoring", and
+    "credit scoring" can all match the same span of text simultaneously, so a
+    greedy longest-match single-pass regex scan (which finds non-overlapping
+    matches) would silently drop the shorter two. Building every contiguous
+    word n-gram at each position and checking it against a dict avoids that:
+    each n-gram length is checked independently, exactly like the old
+    per-keyword loop, just without re-scanning the text once per keyword.
+    """
+
+    def __init__(self, keywords: Iterable[str]) -> None:
+        by_normalized: dict[str, list[str]] = {}
+        max_words = 1
+        for kw in keywords:
+            norm = normalize_text(kw)
+            if not norm:
+                continue
+            by_normalized.setdefault(norm, []).append(kw)
+            max_words = max(max_words, len(norm.split()))
+        self._by_normalized = by_normalized
+        self._max_words = max_words
+
+    def find_matching_keywords(self, use_case: str) -> list[str]:
+        """Original keyword strings whose normalized form matched `use_case`."""
+        if not self._by_normalized:
+            return []
+        words = use_case.split()
+        found_norms: set[str] = set()
+        for start in range(len(words)):
+            for length in range(1, min(self._max_words, len(words) - start) + 1):
+                candidate = " ".join(words[start : start + length])
+                # Checked independently, not elif/continue: the pack can
+                # contain both a stem and its own explicit plural as distinct
+                # keyword entries (e.g. "benefit" and "benefits"), and the old
+                # per-keyword loop matched both against one occurrence of
+                # "benefits" in the text — one testing the stem plus its
+                # optional suffix, the other matching the plural verbatim.
+                if candidate in self._by_normalized:
+                    found_norms.add(candidate)
+                for suffix in ("es", "s"):
+                    stem = candidate[: -len(suffix)]
+                    if candidate.endswith(suffix) and stem in self._by_normalized:
+                        found_norms.add(stem)
+                        break
+        matched: list[str] = []
+        for norm in found_norms:
+            matched.extend(self._by_normalized[norm])
+        return matched
+
+
+def _match_pack_keywords(
+    keywords: Iterable[str] | _CompiledKeywordMatcher, use_case: str
+) -> list[str]:
+    """Keywords firing for `use_case`, subject to the co-occurrence requirement.
+
+    A multi-word phrase carries its own context and fires alone. A bare
+    single token does not: "education" alone matches "self-serve education
+    videos about our API" and "migration" alone matches "cloud migration
+    planning tool", neither of which is an Annex III system. Requiring two
+    distinct single tokens is the signal that they describe one subject
+    rather than coincidental words.
+
+    `keywords` accepts a pre-built _CompiledKeywordMatcher (the hot path —
+    AnnexIIIClassifierRule/ProfilingDetectionRule pass their module-level
+    precompiled matchers so the alternation regex is built once, not per
+    request) or a plain iterable of keyword strings (builds one on the fly;
+    used by callers exercising matching semantics directly, e.g. tests).
+
+    Returns [] when the category does not fire, so callers can treat the
+    result as a boolean.
+    """
+    matcher = (
+        keywords
+        if isinstance(keywords, _CompiledKeywordMatcher)
+        else _CompiledKeywordMatcher(keywords)
+    )
+    matched = matcher.find_matching_keywords(use_case)
+    has_phrase = any(" " in normalize_text(kw) for kw in matched)
+    singles = {normalize_text(kw) for kw in matched if " " not in normalize_text(kw)}
+    # Token length is deliberately NOT used to let a single word fire alone:
+    # "recidivism" (10) and "inference" (9) are indistinguishable by length,
+    # so a length rule readmits exactly the substring-era false positives.
+    # Distinctive terms earn their match through a partner token instead,
+    # which is why the pack carries the surrounding vocabulary.
+    if has_phrase or len(singles) >= 2:
+        return matched
+    return []
+
+
+class KnowledgePackError(RuntimeError):
+    """Raised when the bundled EU AI Act knowledge pack yields an empty ruleset.
+
+    An empty classification set is never legitimate: it would silently pass
+    every use case as non-prohibited and non-high-risk with zero signal.
+    """
+
+
+def _build_annex_iii_categories() -> dict[str, frozenset[str]]:
+    """Build Annex III keyword sets from the bundled knowledge pack (single source of truth)."""
+    from opencomplai_core.knowledge.annex_iii import ANNEX_III
+
+    result: dict[str, list[str]] = {}
+    for entry in ANNEX_III:
+        area_name = _PACK_AREA_NAME_REMAP.get(entry.area_name, entry.area_name)
+        if area_name not in result:
+            result[area_name] = []
+        result[area_name].append(area_name.replace("_", " "))
+        for phrase in (entry.title, *entry.keywords):
+            result[area_name].extend(_expand_pack_phrase(phrase))
+        for signal in entry.code_signals:
+            normalized = normalize_text(signal.replace("_", " "))
+            result[area_name].append(normalized)
+    built = {k: frozenset(v) for k, v in result.items()}
+    if not built or any(not v for v in built.values()):
+        raise KnowledgePackError(
+            "Annex III knowledge pack produced an empty ruleset; refusing to "
+            "silently classify every use case as non-high-risk."
+        )
+    return built
 
 
 def _build_subject_gated_keywords() -> frozenset[str]:
@@ -192,24 +343,24 @@ def _build_subject_gated_keywords() -> frozenset[str]:
     scoped). Gating must follow the matched keyword back to its specific
     sub-point, not the coarse area bucket used for display grouping.
     """
-    result: list[str] = []
-    try:
-        from opencomplai_ai.knowledge.annex_iii import ANNEX_III
+    from opencomplai_core.knowledge.annex_iii import ANNEX_III
 
-        for entry in ANNEX_III:
-            if not entry.subject_gated:
-                continue
-            for phrase in (entry.title, *entry.keywords):
-                result.extend(_expand_pack_phrase(phrase))
-            for signal in entry.code_signals:
-                normalized = normalize_text(signal.replace("_", " "))
-                result.append(normalized)
-                for word in normalized.split():
-                    if len(word) >= 7 and word not in _PACK_TOKEN_DENYLIST:
-                        result.append(word)
-    except ImportError:
-        pass
-    return frozenset(result)
+    result: list[str] = []
+    for entry in ANNEX_III:
+        if not entry.subject_gated:
+            continue
+        for phrase in (entry.title, *entry.keywords):
+            result.extend(_expand_pack_phrase(phrase))
+        for signal in entry.code_signals:
+            normalized = normalize_text(signal.replace("_", " "))
+            result.append(normalized)
+    built = frozenset(result)
+    if not built:
+        raise KnowledgePackError(
+            "Subject-gated Annex III keyword set is empty; refusing to "
+            "silently disable the person-scoping check."
+        )
+    return built
 
 
 _NATURAL_PERSON_CUES: frozenset[str] = frozenset()
@@ -239,37 +390,53 @@ def _subject_looks_non_person(use_case: str) -> bool:
 
 
 def _build_unacceptable_risk_signals() -> frozenset[str]:
-    """Build Art. 5 prohibited signals from the knowledge pack."""
-    signals: list[str] = []
-    try:
-        from opencomplai_ai.knowledge.prohibited import PROHIBITED
+    """Build Art. 5 prohibited signals from the bundled knowledge pack."""
+    from opencomplai_core.knowledge.prohibited import PROHIBITED
 
-        for entry in PROHIBITED:
-            signals.append(entry.title)
-            signals.extend(entry.keywords)
-    except ImportError:
-        pass
-    return frozenset(signals)
+    signals: list[str] = []
+    for entry in PROHIBITED:
+        signals.append(entry.title)
+        signals.extend(entry.keywords)
+    built = frozenset(signals)
+    if not built:
+        raise KnowledgePackError(
+            "Art. 5 prohibited-practice knowledge pack is empty; refusing to "
+            "silently classify every use case as non-prohibited."
+        )
+    return built
 
 
 def _build_profiling_signals() -> frozenset[str]:
-    """Build Art. 6(3) profiling signals from pack entries flagged art6_3_profiling."""
-    signals: list[str] = []
-    try:
-        from opencomplai_ai.knowledge.annex_iii import ANNEX_III
+    """Build Art. 6(3) profiling signals from bundled pack entries flagged art6_3_profiling."""
+    from opencomplai_core.knowledge.annex_iii import ANNEX_III
 
-        for entry in ANNEX_III:
-            if entry.art6_3_profiling:
-                for phrase in (entry.title, *entry.keywords):
-                    signals.extend(_expand_pack_phrase(phrase))
-    except ImportError:
-        pass
-    return frozenset(signals)
+    signals: list[str] = []
+    for entry in ANNEX_III:
+        if entry.art6_3_profiling:
+            for phrase in (entry.title, *entry.keywords):
+                signals.extend(_expand_pack_phrase(phrase))
+    built = frozenset(signals)
+    if not built:
+        raise KnowledgePackError(
+            "Art. 6(3) profiling knowledge pack is empty; refusing to "
+            "silently disable the profiling override."
+        )
+    return built
 
 
 ANNEX_III_CATEGORIES: dict[str, frozenset[str]] = _build_annex_iii_categories()
 UNACCEPTABLE_RISK_SIGNALS: frozenset[str] = _build_unacceptable_risk_signals()
 SUBJECT_GATED_KEYWORDS: frozenset[str] = _build_subject_gated_keywords()
+
+# Compiled once at import time (DOS-LIMITS) — one alternation-regex scan per
+# rule per request instead of one re.search per keyword. Rebuilding these per
+# request would reintroduce the O(keywords) construction cost this exists to
+# remove, so they are module-level singletons keyed to the constants above.
+_ANNEX_III_MATCHERS: dict[str, _CompiledKeywordMatcher] = {
+    category: _CompiledKeywordMatcher(keywords)
+    for category, keywords in ANNEX_III_CATEGORIES.items()
+}
+_UNACCEPTABLE_RISK_MATCHER = _CompiledKeywordMatcher(UNACCEPTABLE_RISK_SIGNALS)
 
 
 class AnnexIIIClassifierRule(BaseRule):
@@ -283,8 +450,8 @@ class AnnexIIIClassifierRule(BaseRule):
         gated_only: list[str] = []
         subject_non_person = _subject_looks_non_person(use_case)
 
-        for category, keywords in ANNEX_III_CATEGORIES.items():
-            matched_kw = [kw for kw in keywords if normalize_text(kw) in use_case]
+        for category in ANNEX_III_CATEGORIES:
+            matched_kw = _match_pack_keywords(_ANNEX_III_MATCHERS[category], use_case)
             if not matched_kw:
                 continue
             if subject_non_person and all(
@@ -331,9 +498,10 @@ class UnacceptableRiskRule(BaseRule):
 
     def evaluate(self, input: AssessmentInput) -> RuleResult:
         use_case = normalize_text(input.model.use_case)
-        matched = [
-            s for s in UNACCEPTABLE_RISK_SIGNALS if normalize_text(s) in use_case
-        ]
+        # No co-occurrence requirement here: Art. 5 signals are curated
+        # prohibited-practice phrases, not expanded vocabulary, and a single
+        # match should surface. Word-boundary matching still applies.
+        matched = _UNACCEPTABLE_RISK_MATCHER.find_matching_keywords(use_case)
         is_unacceptable = len(matched) > 0
 
         return RuleResult(
@@ -356,6 +524,7 @@ class ProfilingDetectionRule(BaseRule):
     reference = "EU AI Act, Article 6(3), Recital 34"
 
     PROFILING_SIGNALS: frozenset[str] = _build_profiling_signals()
+    _MATCHER: _CompiledKeywordMatcher = _CompiledKeywordMatcher(PROFILING_SIGNALS)
 
     def evaluate(self, input: AssessmentInput) -> RuleResult:
         if input.answers.get("profiling_detected") is True:
@@ -371,7 +540,7 @@ class ProfilingDetectionRule(BaseRule):
             )
 
         use_case = normalize_text(input.model.use_case)
-        matched = [s for s in self.PROFILING_SIGNALS if normalize_text(s) in use_case]
+        matched = _match_pack_keywords(self._MATCHER, use_case)
 
         if matched and _subject_looks_non_person(use_case):
             # Art. 6(3) / Recital 34 profiling is defined as profiling of
@@ -453,4 +622,4 @@ RULE_REGISTRY: list[BaseRule] = [
 # Bump when any rule logic, keyword list, or reference changes.
 # Every generated dossier references this version for Annex IV traceability
 # per EU AI Act Art. 11 and post-market monitoring (Art. 72).
-RULE_SET_VERSION = "1.2.0"
+RULE_SET_VERSION = "1.3.0"

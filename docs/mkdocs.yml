@@ -159,6 +159,8 @@ nav:
   - Deployment:
     - Docker Quickstart: deployment/quickstart.md
     - Configuration: deployment/configuration.md
+    - Authentication: deployment/authentication.md
+    - Observability: deployment/observability.md
     - Air-gap: deployment/airgap.md
 
   - Core Concepts:
@@ -208,9 +210,13 @@ extra_css:
   - stylesheets/tokens.css
   - stylesheets/extra.css
 
-# EU AI Act checker widget — only loads on the checker page (auto-mounts on #ococ-checker)
+# EU AI Act checker widget (auto-mounts on #ococ-checker, so it is inert on
+# every other page). checker-config.js MUST stay first: it sets
+# window.OCOC_RISK_ENGINE_URL, which the bundle reads to decide whether the
+# "email a copy" feature is available at all.
 extra_javascript:
-  - assets/js/checker-widget.js?v=checker-2025-07-28
+  - assets/js/checker-config.js
+  - assets/js/checker-widget.js?v=checker-2026-07-24
 
 # Extra configuration
 extra:

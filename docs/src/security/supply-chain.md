@@ -101,3 +101,43 @@ and pipe it into other tooling:
 CI runs an equivalent scan on every pull request via the `vulnerability-scan`
 job in [`ci-docker.yml`](https://github.com/Opencomplai/opencomplai/actions/workflows/ci-docker.yml).
 CRITICAL and HIGH fixable findings fail the build.
+
+That job scans **all five service images** — `gateway-api`, `risk-engine`,
+`evidence-vault`, `doc-generator` and `egress-proxy`. It previously covered only
+`gateway-api`, so the other four were signed and SBOM'd at release but never
+CVE-scanned: an SBOM records what is in an image, it does not say the contents
+are safe.
+
+The same scan now also runs as a **release gate** in
+[`supply-chain.yml`](https://github.com/Opencomplai/opencomplai/actions/workflows/supply-chain.yml),
+before the image is pushed or signed. Signing first would mean attesting an
+image nobody had checked.
+
+Unfixable findings are excluded (`ignore-unfixed`). They cannot be acted on
+here, and a gate that cannot be made green is one people learn to route around.
+
+## Python packages
+
+PyPI releases are published with **Trusted Publishing (OIDC)** — no API token
+and no long-lived secret. Every distribution carries two independent
+attestations:
+
+- **PEP 740 attestations**, generated at upload and shown on the file's PyPI
+  page.
+- **SLSA build provenance**, attached to the same files and verifiable with:
+
+=== "macOS / Linux"
+    ```bash
+    gh attestation verify opencomplai_core-1.0.0-py3-none-any.whl \
+      --repo Opencomplai/opencomplai
+    ```
+
+=== "Windows (PowerShell)"
+    ```powershell
+    gh attestation verify opencomplai_core-1.0.0-py3-none-any.whl `
+      --repo Opencomplai/opencomplai
+    ```
+
+Until this change the Python side was held to a weaker bar than the container
+side — signed images and SBOMs for what runs in a cluster, a static API token
+and no attestation at all for the artifacts every `pip install` actually pulls.

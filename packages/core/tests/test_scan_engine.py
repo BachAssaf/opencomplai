@@ -16,9 +16,11 @@ from opencomplai_core.models import (
 from opencomplai_core.scan_engine import (
     _filter_features_to_detected_files,
     _upgrade_intent_evidence,
+    run_detectors,
     run_scan,
 )
 from opencomplai_core.scanner.feature_types import CallsiteRef, FeatureStore, ImportRef
+from opencomplai_core.scanner.registry import DETECTOR_REGISTRY
 
 try:
     from opencomplai_ai.models import IntentAnnotation
@@ -36,6 +38,71 @@ def _biometric_repo(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return tmp_path
+
+
+class _RaisingDetector:
+    """Fixture detector that always crashes — for fail-closed regression tests."""
+
+    detector_id = "DET_FAKE_RAISING_V1"
+
+    def detect(self, features):
+        raise RuntimeError("synthetic detector crash")
+
+
+def test_run_detectors_records_failure_without_aborting_the_scan():
+    features = FeatureStore(repo_root=Path("."))
+    registry = [*DETECTOR_REGISTRY, _RaisingDetector()]
+
+    evidence, detector_errors = run_detectors(features, registry=registry)
+
+    assert isinstance(evidence, list)
+    assert detector_errors == ["DET_FAKE_RAISING_V1: RuntimeError: synthetic detector crash"]
+
+
+def test_run_detectors_reports_no_errors_when_all_detectors_succeed():
+    features = FeatureStore(repo_root=Path("."))
+
+    evidence, detector_errors = run_detectors(features, registry=list(DETECTOR_REGISTRY))
+
+    assert isinstance(evidence, list)
+    assert detector_errors == []
+
+
+def test_run_scan_surfaces_detector_errors_on_the_report(tmp_path, monkeypatch):
+    import opencomplai_core.scan_engine as scan_engine_module
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        scan_engine_module,
+        "DETECTOR_REGISTRY",
+        [*scan_engine_module.DETECTOR_REGISTRY, _RaisingDetector()],
+    )
+
+    report = run_scan(
+        system_id="test-sys",
+        commit_ref="HEAD",
+        repo_root=tmp_path,
+        declared_purpose="customer support chatbot",
+    )
+
+    assert report.detector_errors == [
+        "DET_FAKE_RAISING_V1: RuntimeError: synthetic detector crash"
+    ]
+
+
+def test_run_scan_reports_empty_detector_errors_on_a_clean_run(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')\n", encoding="utf-8")
+
+    report = run_scan(
+        system_id="test-sys",
+        commit_ref="HEAD",
+        repo_root=tmp_path,
+        declared_purpose="customer support chatbot",
+    )
+
+    assert report.detector_errors == []
 
 
 def test_declared_minimal_biometric_prod_major_discrepancy(tmp_path: Path):

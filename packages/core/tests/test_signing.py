@@ -4,7 +4,16 @@ from pathlib import Path
 
 import pytest
 from opencomplai_core.models import ScanResult, ScanStatusArtifact
-from opencomplai_core.signing import generate_keypair, sign_artifact, verify_artifact
+from opencomplai_core.signing import (
+    SigningDomain,
+    canonical_json_bytes,
+    domain_separated,
+    generate_keypair,
+    sign_artifact,
+    sign_bundle_bytes,
+    verify_artifact,
+    verify_bundle_bytes,
+)
 
 
 @pytest.fixture
@@ -102,3 +111,82 @@ def test_different_results_produce_different_signatures(
     )
     sig_fail = sign_artifact(fail_artifact, keypair / "signing.key")
     assert sig_pass != sig_fail
+
+
+# --- domain separation (EVID-CRYPTO) ---------------------------------------
+
+
+def test_domain_separated_binds_the_purpose_into_the_signed_bytes():
+    payload = b"PAYLOAD"
+    artifact = domain_separated(SigningDomain.ARTIFACT, payload)
+    badge = domain_separated(SigningDomain.BADGE, payload)
+
+    assert artifact != badge
+    assert artifact.endswith(payload)
+    assert badge.endswith(payload)
+    assert artifact.startswith(b"opencomplai.sig.v1\x00")
+    # The version lives in the prefix so a future scheme is a new prefix
+    # rather than a silent reinterpretation of the same bytes.
+    assert artifact == b"opencomplai.sig.v1\x00scan-status-artifact\x00PAYLOAD"
+
+
+def test_a_signature_does_not_verify_under_a_different_domain(tmp_path):
+    """
+    The defect this exists to close.
+
+    `sign_artifact` and the badge verifier used to produce byte-identical
+    preimages, so a signature from `opencomplai check --sign` verified
+    unmodified as a compliance-badge signature for the same object — one
+    attestation silently doing duty as another.
+    """
+    generate_keypair(tmp_path)
+    priv, pub = tmp_path / "signing.key", tmp_path / "signing.pub"
+    body = canonical_json_bytes({"system_id": "s", "result": "pass"})
+
+    signature = sign_bundle_bytes(body, priv, SigningDomain.BADGE)
+
+    assert verify_bundle_bytes(body, signature, pub, SigningDomain.BADGE) is True
+    for other in (SigningDomain.ARTIFACT, SigningDomain.DOSSIER_BUNDLE):
+        assert verify_bundle_bytes(body, signature, pub, other) is False
+
+
+def test_an_artifact_signature_is_not_a_badge_signature(tmp_path, sample_artifact):
+    """End-to-end version of the same property, across the two real entry points."""
+    generate_keypair(tmp_path)
+    priv, pub = tmp_path / "signing.key", tmp_path / "signing.pub"
+
+    signature = sign_artifact(sample_artifact, priv)
+    badge_preimage = canonical_json_bytes(sample_artifact.model_dump(exclude={"signature"}))
+
+    # Before domain separation this assertion was False: the CLI's signature
+    # was accepted verbatim by the badge verifier.
+    assert (
+        verify_bundle_bytes(badge_preimage, signature, pub, SigningDomain.BADGE) is False
+    )
+    # ...and it still verifies as what it actually is.
+    signed = sample_artifact.model_copy(update={"signature": signature})
+    assert verify_artifact(signed, pub) is True
+
+
+def test_untagged_legacy_signatures_do_not_verify(tmp_path):
+    """
+    Hard cutover, pinned.
+
+    Nothing in this system re-verifies a stored signature, so there is no
+    population an accept-both window would protect — and while such a window
+    was open it would keep accepting exactly the confusable signatures this
+    change removes.
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    generate_keypair(tmp_path)
+    priv, pub = tmp_path / "signing.key", tmp_path / "signing.pub"
+    body = b"legacy bundle bytes"
+
+    private_key = serialization.load_pem_private_key(priv.read_bytes(), password=None)
+    import base64
+
+    legacy = base64.b64encode(private_key.sign(body)).decode()
+
+    for domain in SigningDomain:
+        assert verify_bundle_bytes(body, legacy, pub, domain) is False

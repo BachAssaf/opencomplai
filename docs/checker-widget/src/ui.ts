@@ -90,7 +90,7 @@ const QUESTIONS: Question[] = [
     skip: (a) => a["gate_is_ai_system"] === false,
   },
   {
-    key: "e2_modifications",
+    key: "e2_modifications", // gitleaks:allow
     label: "Do you (or a downstream operator) make substantial modifications to the system?",
     type: "confirm",
     section: "Operator role",
@@ -134,6 +134,15 @@ const QUESTIONS: Question[] = [
         a["e3_product_integration"] === "none"),
   },
   {
+    key: "hr8_conformity_assessment",
+    label:
+      "Is that Annex I product required to undergo a third-party conformity assessment by a notified body (Art 6(1)(b))?",
+    type: "confirm",
+    section: "Risk classification",
+    defaultBool: false,
+    skip: (a) => !a["hr1_annex_i"],
+  },
+  {
     key: "hr2_annex_iii",
     label: "Does the system fall within an Annex III high-risk use case?",
     type: "confirm",
@@ -147,36 +156,48 @@ const QUESTIONS: Question[] = [
         a["e3_product_integration"] === "none"),
   },
   {
-    key: "hr3_art_6_3",
-    label: "Does Article 6(3) apply (safety component required for product conformity)?",
+    key: "hr7_profiling",
+    label:
+      "Does the system perform profiling of natural persons (automated processing of personal data to evaluate, analyse, or predict aspects such as behaviour, preferences, location, or performance)?",
     type: "confirm",
     section: "Risk classification",
     defaultBool: false,
-    skip: (a) => !a["hr1_annex_i"] && !a["hr2_annex_iii"],
+    skip: (a) => !a["hr2_annex_iii"],
+  },
+  {
+    key: "hr3_art_6_3",
+    label:
+      "Is the AI system intended only to improve the result of a previously completed human activity (Art 6(3)(b))?",
+    type: "confirm",
+    section: "Risk classification",
+    defaultBool: false,
+    skip: (a) => !a["hr2_annex_iii"] || (!!a["hr1_annex_i"] && !!a["hr8_conformity_assessment"]),
   },
   {
     key: "hr4_narrow_task",
-    label: "Is the AI intended only for a narrow procedural task (Art 6(3) exception)?",
+    label: "Is the AI intended only for a narrow procedural task (Art 6(3)(a))?",
     type: "confirm",
     section: "Risk classification",
     defaultBool: false,
-    skip: (a) => !a["hr1_annex_i"] && !a["hr2_annex_iii"],
+    skip: (a) => !a["hr2_annex_iii"] || (!!a["hr1_annex_i"] && !!a["hr8_conformity_assessment"]),
   },
   {
     key: "hr5_no_significant_risk",
-    label: "Does the system NOT pose significant risk to health, safety, or fundamental rights?",
+    label:
+      "Is the AI system intended only to detect decision-making patterns or deviations from prior decisions, without replacing or influencing the prior human assessment and without proper human review (Art 6(3)(c))?",
     type: "confirm",
     section: "Risk classification",
     defaultBool: false,
-    skip: (a) => !a["hr1_annex_i"] && !a["hr2_annex_iii"],
+    skip: (a) => !a["hr2_annex_iii"] || (!!a["hr1_annex_i"] && !!a["hr8_conformity_assessment"]),
   },
   {
     key: "hr6_accessory",
-    label: "Is the system purely accessory to the relevant human decision (Art 6(3))?",
+    label:
+      "Is the AI system intended only to perform a preparatory task for an assessment relevant to the Annex III use case (Art 6(3)(d))?",
     type: "confirm",
     section: "Risk classification",
     defaultBool: false,
-    skip: (a) => !a["hr1_annex_i"] && !a["hr2_annex_iii"],
+    skip: (a) => !a["hr2_annex_iii"] || (!!a["hr1_annex_i"] && !!a["hr8_conformity_assessment"]),
   },
   {
     key: "s1_in_scope",
@@ -225,6 +246,7 @@ const QUESTIONS: Question[] = [
     type: "confirm",
     section: "Scope",
     defaultBool: false,
+    helpKey: "gpai_systemic_risk_threshold",
     skip: (a) => !a["s1_gpai"],
   },
   {
@@ -1013,15 +1035,48 @@ function answerEntries(answers: Record<string, unknown>): AnswerEntry[] {
 }
 
 // ── email delivery (public docs site only — see isLocalCliServed) ───────────
-// The CLI's --local mode is explicitly offline, so it never shows this; the
-// hosted docs.opencomplai.com page calls the risk-engine's /v1/checker/email.
+// The CLI's --local mode is explicitly offline, so it never shows this. On a
+// docs site the form appears only when a risk-engine is actually configured
+// to receive it; see checkerApiBase below.
 
-const CHECKER_API_BASE =
-  (typeof window !== "undefined" && (window as { OCOC_RISK_ENGINE_URL?: string }).OCOC_RISK_ENGINE_URL) ||
-  "http://localhost:8001";
+const LOCAL_RISK_ENGINE_URL = "http://localhost:8001";
 
-async function emailResult(answers: Record<string, unknown>, toEmail: string): Promise<void> {
-  const res = await fetch(`${CHECKER_API_BASE}/v1/checker/email`, {
+function isLocalOrigin(): boolean {
+  if (typeof window === "undefined") return false;
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+/**
+ * Where to send "email a copy" requests, or null when email is not available.
+ *
+ * `window.OCOC_RISK_ENGINE_URL` is set by `assets/js/checker-config.js`, which
+ * mkdocs loads ahead of this bundle (OPS-HEALTH, finding 32).
+ *
+ * The previous version fell back to `http://localhost:8001` unconditionally.
+ * On the hosted docs site that address is the *visitor's own machine*, so
+ * every send failed with a confusing browser error — the feature looked
+ * available and was not. The fallback now applies only when the page itself is
+ * served from localhost (the `mkdocs serve` / self-hosted-docs case, where a
+ * developer plausibly does have a risk-engine running). Anywhere else, an
+ * unconfigured deployment reports email as unavailable and the caller hides
+ * the form rather than offering something that cannot work.
+ */
+export function checkerApiBase(): string | null {
+  if (typeof window === "undefined") return null;
+  const configured = (window as { OCOC_RISK_ENGINE_URL?: string }).OCOC_RISK_ENGINE_URL;
+  if (typeof configured === "string" && configured.trim() !== "") {
+    return configured.trim().replace(/\/+$/, "");
+  }
+  return isLocalOrigin() ? LOCAL_RISK_ENGINE_URL : null;
+}
+
+async function emailResult(
+  apiBase: string,
+  answers: Record<string, unknown>,
+  toEmail: string,
+): Promise<void> {
+  const res = await fetch(`${apiBase}/v1/checker/email`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ answers, to_email: toEmail }),
@@ -1220,7 +1275,12 @@ function renderResult(state: State, root: HTMLElement) {
   exportRow.appendChild(btnPrint);
   card.appendChild(exportRow);
 
-  if (!isLocalCliServed()) {
+  // Shown only when email can actually work: not in the CLI's offline --local
+  // mode, and only where a risk-engine URL is configured (or the page is
+  // served from localhost). Rendering the form on a docs site with no
+  // configured backend would offer a button that always fails.
+  const emailApiBase = checkerApiBase();
+  if (!isLocalCliServed() && emailApiBase) {
     card.appendChild(h("div", { className: "ococ-section-title" }, "Email a copy"));
     const emailRow = h("div", { className: "ococ-email" });
     const emailInput = h("input", {
@@ -1244,7 +1304,7 @@ function renderResult(state: State, root: HTMLElement) {
       emailBtn.textContent = "Sending…";
       emailStatus.textContent = "";
       emailStatus.className = "ococ-email-status";
-      emailResult(state.answers, toEmail)
+      emailResult(emailApiBase, state.answers, toEmail)
         .then(() => {
           emailStatus.textContent = "Sent — check your inbox.";
           emailStatus.className = "ococ-email-status ococ-email-success";

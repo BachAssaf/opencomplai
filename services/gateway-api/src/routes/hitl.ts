@@ -21,6 +21,18 @@ const AssignSchema = z.object({
   reviewer_id: z.string().min(1),
 });
 
+/**
+ * Bind actor_id/reviewer_id to the gateway-verified principal (SEC-SERVICE-AUTH)
+ * rather than trusting the client-supplied body field — otherwise any
+ * network-adjacent caller could forge whose decision lands in the immutable
+ * ledger. request.principalId is unset only under OPENCOMPLAI_AUTH_DISABLED=1
+ * (local dev), where falling back to the client-supplied value preserves the
+ * existing bypass rather than breaking local development.
+ */
+function resolveActorId(request: FastifyRequest, clientSupplied: string): string {
+  return request.principalId ?? clientSupplied;
+}
+
 const RISK_ENGINE = process.env.RISK_ENGINE_URL || 'http://risk-engine:8001';
 
 export const hitlRoutes: FastifyPluginAsync = async (app): Promise<void> => {
@@ -41,7 +53,13 @@ export const hitlRoutes: FastifyPluginAsync = async (app): Promise<void> => {
 
   app.get('/hitl/queue/:id', async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const { id } = req.params as { id: string };
-    await proxyToService(RISK_ENGINE, `/v1/hitl/queue/${id}`, 'GET', undefined, reply);
+    await proxyToService(
+      RISK_ENGINE,
+      `/v1/hitl/queue/${encodeURIComponent(id)}`,
+      'GET',
+      undefined,
+      reply,
+    );
   });
 
   app.post(
@@ -59,7 +77,13 @@ export const hitlRoutes: FastifyPluginAsync = async (app): Promise<void> => {
         });
         return;
       }
-      await proxyToService(RISK_ENGINE, `/v1/hitl/queue/${id}/assign`, 'POST', parsed.data, reply);
+      await proxyToService(
+        RISK_ENGINE,
+        `/v1/hitl/queue/${encodeURIComponent(id)}/assign`,
+        'POST',
+        { ...parsed.data, reviewer_id: resolveActorId(req, parsed.data.reviewer_id) },
+        reply,
+      );
     },
   );
 
@@ -78,7 +102,13 @@ export const hitlRoutes: FastifyPluginAsync = async (app): Promise<void> => {
         });
         return;
       }
-      await proxyToService(RISK_ENGINE, `/v1/hitl/queue/${id}/decide`, 'POST', parsed.data, reply);
+      await proxyToService(
+        RISK_ENGINE,
+        `/v1/hitl/queue/${encodeURIComponent(id)}/decide`,
+        'POST',
+        { ...parsed.data, actor_id: resolveActorId(req, parsed.data.actor_id) },
+        reply,
+      );
     },
   );
 
@@ -95,6 +125,12 @@ export const hitlRoutes: FastifyPluginAsync = async (app): Promise<void> => {
       return;
     }
 
-    await proxyToService(RISK_ENGINE, '/v1/hitl/overrides', 'POST', parsed.data, reply);
+    await proxyToService(
+      RISK_ENGINE,
+      '/v1/hitl/overrides',
+      'POST',
+      { ...parsed.data, actor_id: resolveActorId(req, parsed.data.actor_id) },
+      reply,
+    );
   });
 };

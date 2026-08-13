@@ -39,8 +39,38 @@ class AnnexIVSection3(BaseModel):
     incident_response_procedure: str
 
 
+#: Marker used by every section this engine cannot derive from the repository.
+#: These are provider attestations, not artefacts a scanner can infer, so they
+#: are emitted as explicit, labelled placeholders rather than silently omitted.
+PROVIDER_SUPPLIED_PLACEHOLDER = (
+    "Not supplied. This section requires a provider attestation and cannot be "
+    "derived automatically from the repository."
+)
+
+
 class AnnexIVSection4(BaseModel):
-    """Logging capabilities (Annex IV, Section 4)."""
+    """Appropriateness of the performance metrics (Annex IV, point 4).
+
+    Annex IV point 4 asks the provider to justify *why* the chosen metrics are
+    appropriate for the intended purpose. It is not a place for logging
+    capability, which is an Article 12 record-keeping obligation — see
+    `ArticleTwelveRecordKeeping`.
+    """
+
+    metrics_reported: dict[str, float] = Field(default_factory=dict)
+    appropriateness_rationale: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    known_metric_limitations: list[str] = Field(default_factory=list)
+    provider_supplied: bool = False
+
+
+class ArticleTwelveRecordKeeping(BaseModel):
+    """Automatic logging and record-keeping (Article 12).
+
+    Was previously emitted as "Annex IV Section 4", which conflated two
+    distinct obligations: Art. 12 requires high-risk systems to log
+    automatically over their lifetime, while Annex IV point 4 concerns the
+    appropriateness of performance metrics.
+    """
 
     logging_enabled: bool
     log_retention_days: int
@@ -70,9 +100,57 @@ class AnnexIVSection5(BaseModel):
     corroboration_report_hash: str | None = None
 
 
+class AnnexIVSection6(BaseModel):
+    """Relevant changes made to the system through its lifecycle (Annex IV, point 6)."""
+
+    changes: list[str] = Field(default_factory=list)
+    change_log_reference: str | None = None
+    note: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    provider_supplied: bool = False
+
+
+class AnnexIVSection7(BaseModel):
+    """Harmonised standards applied, or other solutions adopted (Annex IV, point 7)."""
+
+    harmonised_standards: list[str] = Field(default_factory=list)
+    alternative_solutions: str | None = None
+    note: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    provider_supplied: bool = False
+
+
+class AnnexIVSection8(BaseModel):
+    """EU declaration of conformity (Annex IV, point 8; Article 47).
+
+    Annex IV point 8 requires a *copy* of the declaration. This dossier records
+    a reference to it — the declaration itself is a signed provider document
+    that this engine neither holds nor can produce.
+    """
+
+    declaration_reference: str | None = None
+    note: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    provider_supplied: bool = False
+
+
+class AnnexIVSection9(BaseModel):
+    """Post-market monitoring plan (Annex IV, point 9; Article 72)."""
+
+    monitoring_plan_reference: str | None = None
+    plan_summary: str | None = None
+    note: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    provider_supplied: bool = False
+
+
 class AnnexIVDossier(BaseModel):
     """
-    Complete Annex IV technical documentation dossier (EU AI Act Article 11).
+    Annex IV technical documentation dossier (EU AI Act Article 11).
+
+    Covers all nine Annex IV points. Points 1-5 are derived from the manifest,
+    risk assessment, evaluators and scanner. Points 6-9 are provider
+    attestations that cannot be inferred from a repository; they are emitted as
+    explicit, labelled placeholders with `provider_supplied=False` until the
+    provider fills them in. `annex_iv_complete` is False while any of them is
+    still a placeholder on a HIGH-risk system — a dossier is not "complete
+    Annex IV" merely because every field is present.
 
     This is the output of the Documentation Generator (REQ-DOC-001).
     In OSS mode: produced as a local bundle with a SHA-256 checksum.
@@ -90,6 +168,15 @@ class AnnexIVDossier(BaseModel):
     section3: AnnexIVSection3
     section4: AnnexIVSection4
     section5: AnnexIVSection5
+    section6: AnnexIVSection6 = Field(default_factory=AnnexIVSection6)
+    section7: AnnexIVSection7 = Field(default_factory=AnnexIVSection7)
+    section8: AnnexIVSection8 = Field(default_factory=AnnexIVSection8)
+    section9: AnnexIVSection9 = Field(default_factory=AnnexIVSection9)
+
+    # Article 12 record-keeping. Kept out of the numbered Annex IV sections
+    # because it is a separate obligation; it was previously mislabelled as
+    # Annex IV Section 4.
+    record_keeping: ArticleTwelveRecordKeeping | None = None
 
     evidence_hashes: list[str] = Field(
         default_factory=list,
@@ -151,5 +238,20 @@ class AnnexIVDossier(BaseModel):
             "False when the dossier was generated with stub Section 2 content "
             "for a HIGH-risk system. Auditors must not rely on Section 2 for "
             "conformity evidence when this field is False."
+        ),
+    )
+
+    # Same guardrail as section2_complete, for the four provider-attestation
+    # sections. Generating 5 of 9 sections and calling the result "Complete
+    # Annex IV" is exactly the overstatement this flag exists to prevent.
+    annex_iv_complete: bool = Field(
+        True,
+        description=(
+            "False when a HIGH-risk dossier still carries placeholder content "
+            "for any of Annex IV Sections 6-9 (lifecycle changes, harmonised "
+            "standards, EU declaration of conformity, post-market monitoring "
+            "plan). These require provider attestation and cannot be derived "
+            "from the repository. Do not present such a dossier as a complete "
+            "Annex IV technical documentation file."
         ),
     )

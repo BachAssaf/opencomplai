@@ -25,6 +25,40 @@ CONFIG_PATTERNS = [
     (re.compile(r"generateContent", re.I), "endpoint"),
     (re.compile(r"gemini-[\d]", re.I), "endpoint"),
     (re.compile(r"localhost:11434", re.I), "endpoint"),
+    # SCAN-COVERAGE: the list above covered 7 of the 22 providers in
+    # ai_signals.json's `ai_sdks`, so a service using Cohere, Mistral, Groq or
+    # any of the rest produced no config evidence at all. Each entry below is
+    # the provider's documented credential env var and its API host.
+    (re.compile(r"CO_API_KEY|COHERE_API_KEY", re.I), "config_key"),
+    (re.compile(r"MISTRAL_API_KEY", re.I), "config_key"),
+    (re.compile(r"GROQ_API_KEY", re.I), "config_key"),
+    (re.compile(r"TOGETHER_API_KEY", re.I), "config_key"),
+    (re.compile(r"REPLICATE_API_TOKEN", re.I), "config_key"),
+    (re.compile(r"FIREWORKS_API_KEY", re.I), "config_key"),
+    (re.compile(r"PERPLEXITY_API_KEY", re.I), "config_key"),
+    (re.compile(r"AI21_API_KEY", re.I), "config_key"),
+    (re.compile(r"STABILITY_(?:API_)?KEY", re.I), "config_key"),
+    (re.compile(r"ELEVEN(?:_?LABS)?_API_KEY", re.I), "config_key"),
+    (re.compile(r"DEEPGRAM_API_KEY", re.I), "config_key"),
+    (re.compile(r"ASSEMBLYAI_API_KEY", re.I), "config_key"),
+    (re.compile(r"WATSONX_API_KEY|WATSONX_APIKEY", re.I), "config_key"),
+    (re.compile(r"HUGGINGFACE(?:HUB)?_API_(?:KEY|TOKEN)", re.I), "config_key"),
+    (re.compile(r"AZURE_OPENAI_API_KEY", re.I), "config_key"),
+    (re.compile(r"api\.cohere\.(?:ai|com)", re.I), "endpoint"),
+    (re.compile(r"api\.mistral\.ai", re.I), "endpoint"),
+    (re.compile(r"api\.groq\.com", re.I), "endpoint"),
+    (re.compile(r"api\.together\.(?:ai|xyz)", re.I), "endpoint"),
+    (re.compile(r"api\.replicate\.com", re.I), "endpoint"),
+    (re.compile(r"api\.fireworks\.ai", re.I), "endpoint"),
+    (re.compile(r"api\.perplexity\.ai", re.I), "endpoint"),
+    (re.compile(r"api\.ai21\.com", re.I), "endpoint"),
+    (re.compile(r"api\.stability\.ai", re.I), "endpoint"),
+    (re.compile(r"api\.elevenlabs\.io", re.I), "endpoint"),
+    (re.compile(r"api\.deepgram\.com", re.I), "endpoint"),
+    (re.compile(r"api\.assemblyai\.com", re.I), "endpoint"),
+    (re.compile(r"api-inference\.huggingface\.co", re.I), "endpoint"),
+    (re.compile(r"\.openai\.azure\.com", re.I), "endpoint"),
+    (re.compile(r"ml\.cloud\.ibm\.com", re.I), "endpoint"),
 ]
 
 TEXT_EXTENSIONS = {
@@ -37,6 +71,10 @@ TEXT_EXTENSIONS = {
     ".md",
     ".ts",
     ".js",
+    ".tsx",
+    ".jsx",
+    ".env",
+    ".properties",
 }
 ENV_FILENAMES = {".env", ".env.local", ".env.example"}
 

@@ -14,8 +14,11 @@ Covers:
 
 from __future__ import annotations
 
+import os
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_evidence_vault.badges import _BadgeBase
 from opencomplai_evidence_vault.bias_alerts import _Base as _BiasBase
 from opencomplai_evidence_vault.cas import CASStore
@@ -25,7 +28,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest_asyncio.fixture
-async def client(tmp_path):
+async def client(tmp_path, _service_token_secret):
     db_path = tmp_path / "test-badges.db"
     cas_path = tmp_path / "cas"
     cas_path.mkdir()
@@ -44,7 +47,9 @@ async def client(tmp_path):
     app.state.cas = CASStore(str(cas_path))
 
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as ac:
         yield ac
 
@@ -193,6 +198,59 @@ async def test_badge_svg_content_type(client):
 async def test_badge_svg_404_for_unknown(client):
     resp = await client.get("/v1/pro/badges/sha256:deadbeef/svg")
     assert resp.status_code == 404
+
+
+async def test_badge_issue_rejects_comment_breakout_system_id(client):
+    """A '-->' breakout system_id must never reach the badge model (H-03)."""
+    resp = await client.post(
+        "/v1/pro/badges/issue",
+        json={
+            "system_id": "--><script>alert(1)</script>",
+            "bundle_checksum": "chk-xss",
+            "artifact": {**_GOOD_ARTIFACT, "system_id": "sys-xss"},
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_badge_svg_escapes_persisted_breakout_system_id(client):
+    """
+    A '-->' breakout system_id can never be *issued* now (see the previous
+    test), but badges written before this allowlist existed — or by any
+    future internal caller that bypasses the Pydantic model — could still
+    carry one. Rendering must escape it regardless: the allowlist is
+    defense in depth, escaping at render time is the actual fix for H-03.
+    """
+    from opencomplai_evidence_vault.badges import BadgeDB
+
+    app = client._transport.app
+    badge_id = "sha256:" + "a" * 64
+    async with app.state.sessionmaker() as session:
+        session.add(
+            BadgeDB(
+                id="breakout-1",
+                badge_id=badge_id,
+                system_id="--><script>alert(1)</script><!--",
+                bundle_checksum="chk-breakout",
+                issued_at="2026-01-01T00:00:00+00:00",
+                status_artifact_hash="sha256:" + "b" * 64,
+            )
+        )
+        await session.commit()
+
+    resp = await client.get(f"/v1/pro/badges/{badge_id}/svg")
+    assert resp.status_code == 200
+    # Exactly one "-->" may appear: the legitimate close of our own comment.
+    # A successful breakout would either close the comment early (a second
+    # occurrence) or inject "<script>" as a live sibling tag.
+    assert resp.text.count("-->") == 1
+    assert "<script>" not in resp.text
+    assert "&lt;script&gt;" in resp.text
+    assert (
+        resp.headers["content-security-policy"]
+        == "default-src 'none'; script-src 'none'"
+    )
+    assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 # ---------------------------------------------------------------------------

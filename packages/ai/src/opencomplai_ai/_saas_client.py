@@ -7,13 +7,24 @@ import os
 import urllib.error
 import urllib.request
 
+from opencomplai_ai.egress import has_consent, is_offline
 from opencomplai_ai.models import (
     IntentAnnotation,
     derive_eu_obligations,
     derive_risk_tier,
 )
+from opencomplai_ai.redaction import redact
 
 _API_URL = "https://api.opencomplai.com/v1/intent"
+
+
+def _unavailable(reason: str, legacy: bool) -> IntentAnnotation | None:
+    """Uniform 'this backend produced nothing' result, with the reason kept."""
+    if legacy:
+        return IntentAnnotation(
+            model_id="saas", risk_tier="minimal", explanation=reason
+        )
+    return None
 
 
 class SaaSIntentClient:
@@ -30,19 +41,38 @@ class SaaSIntentClient:
         ai_usage_type: str | None = None,
         legacy: bool = False,
     ) -> IntentAnnotation | None:
+        # Checked before the API key: offline mode is a hard operator policy
+        # and must not depend on whether credentials happen to be configured.
+        if is_offline():
+            return _unavailable(
+                "OPENCOMPLAI_OFFLINE is set — no code was sent. "
+                "Choose a local model with 'opencomplai ai configure'.",
+                legacy,
+            )
+
+        # Sending source code to a third party requires a recorded opt-in
+        # (AI-EGRESS). Selecting the model from a list is not consent.
+        if not has_consent():
+            return _unavailable(
+                "Data egress to the cloud intent API has not been consented to — "
+                "no code was sent. Run 'opencomplai ai configure --model saas' to "
+                "review what is sent and opt in.",
+                legacy,
+            )
+
         if not self._api_key:
-            if legacy:
-                return IntentAnnotation(
-                    model_id="saas",
-                    risk_tier="minimal",
-                    explanation="OPENCOMPLAI_API_KEY not set — set it to use cloud intent analysis.",
-                )
-            return None
+            return _unavailable(
+                "OPENCOMPLAI_API_KEY not set — set it to use cloud intent analysis.",
+                legacy,
+            )
         try:
+            # Scrub before the payload is built, so there is no path where an
+            # unredacted snippet reaches the request body.
+            scrubbed = redact(snippet)
             payload = json.dumps(
                 {
-                    "snippet": snippet,
-                    "declared_purpose": declared_purpose,
+                    "snippet": scrubbed.text,
+                    "declared_purpose": redact(declared_purpose).text,
                     "location": location,
                 }
             ).encode("utf-8")
@@ -112,10 +142,7 @@ class SaaSIntentClient:
                 return None
             return ann
         except Exception:
-            if legacy:
-                return IntentAnnotation(
-                    model_id="saas",
-                    risk_tier="minimal",
-                    explanation="Cloud intent API unavailable — check OPENCOMPLAI_API_KEY and network.",
-                )
-            return None
+            return _unavailable(
+                "Cloud intent API unavailable — check OPENCOMPLAI_API_KEY and network.",
+                legacy,
+            )

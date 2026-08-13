@@ -1,29 +1,31 @@
 """POST /v1/evals/run endpoint tests."""
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from opencomplai_risk_engine import main as risk_main
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_risk_engine.main import app
 
 
 @pytest.fixture(autouse=True)
-def _vault_and_cache():
-    risk_main._COMPLETED_EVALS.clear()
+def _vault_and_cache(fake_vault):
     with patch(
         "opencomplai_risk_engine.main._record_hitl_event",
         new_callable=AsyncMock,
         return_value="evt_eval",
     ):
         yield
-    risk_main._COMPLETED_EVALS.clear()
+    fake_vault.clear()
 
 
 @pytest.mark.asyncio
 async def test_evals_run_happy_path():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r = await client.post(
             "/v1/evals/run",
@@ -47,7 +49,9 @@ async def test_evals_run_happy_path():
 @pytest.mark.asyncio
 async def test_evals_run_422_on_mismatched_system_id():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as client:
         r = await client.post(
             "/v1/evals/run",

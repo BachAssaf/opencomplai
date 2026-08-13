@@ -60,7 +60,11 @@ def test_generate_dossier_for_high_risk_system():
     )
     assert dossier.section5.risk_level == "high"
     assert dossier.section5.rules_failed > 0
-    assert validate_dossier_schema(dossier) is True
+    # Validation now fails: Annex IV Sections 6-9 are provider attestations
+    # that this engine cannot derive, and a high-risk dossier without them is
+    # not a complete Annex IV file. See
+    # test_high_risk_dossier_passes_once_sections_6_to_9_are_attested.
+    assert validate_dossier_schema(dossier) is False
 
 
 def test_bundle_checksum_is_deterministic():
@@ -73,13 +77,70 @@ def test_bundle_checksum_is_deterministic():
 
 
 def test_all_annex_iv_sections_populated():
-    """All five Annex IV sections must be present and non-empty."""
+    """All NINE Annex IV points must be present, plus Art. 12 record-keeping."""
     dossier = generate_dossier(_make_manifest(), _make_risk_result())
     assert dossier.section1.system_name
     assert dossier.section2.training_data_description
     assert dossier.section3.monitoring_approach
-    assert dossier.section4.logging_enabled is True
+    # Section 4 is the appropriateness of the performance metrics (Annex IV
+    # pt.4), not logging — logging is Art. 12 and lives in record_keeping.
+    assert dossier.section4.appropriateness_rationale
     assert dossier.section5.rationale_hash.startswith("sha256:")
+    assert dossier.section6 is not None
+    assert dossier.section7 is not None
+    assert dossier.section8 is not None
+    assert dossier.section9 is not None
+    assert dossier.record_keeping is not None
+    assert dossier.record_keeping.logging_enabled is True
+
+
+def test_sections_6_to_9_are_present_and_honestly_labelled():
+    """Unattested sections must be explicit placeholders, never silently absent."""
+    dossier = generate_dossier(_make_manifest(), _make_risk_result())
+    for section in (
+        dossier.section6,
+        dossier.section7,
+        dossier.section8,
+        dossier.section9,
+    ):
+        assert section.provider_supplied is False
+        assert "provider attestation" in section.note
+
+
+def test_high_risk_dossier_missing_sections_6_to_9_fails_validation():
+    """A 5-of-9 dossier must not pass the release gate as complete Annex IV."""
+    dossier = generate_dossier(
+        _make_manifest(purpose="employment screening"),
+        _make_risk_result("employment screening"),
+    )
+    assert dossier.section1.risk_class == "high"
+    assert dossier.annex_iv_complete is False
+    assert validate_dossier_schema(dossier) is False
+
+
+def test_high_risk_dossier_passes_once_sections_6_to_9_are_attested():
+    manifest = _make_manifest(purpose="employment screening")
+    dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
+
+    dossier.section4.provider_supplied = True
+    for section in (
+        dossier.section6,
+        dossier.section7,
+        dossier.section8,
+        dossier.section9,
+    ):
+        section.provider_supplied = True
+    dossier.annex_iv_complete = True
+
+    assert validate_dossier_schema(dossier) is True
+
+
+def test_non_high_risk_dossier_is_not_gated_on_provider_attestations():
+    """Annex IV pt.6-9 attestation is a high-risk obligation."""
+    dossier = generate_dossier(_make_manifest(), _make_risk_result())
+    assert dossier.section1.risk_class != "high"
+    assert dossier.annex_iv_complete is True
+    assert validate_dossier_schema(dossier) is True
 
 
 def test_section2_overrides_from_manifest():
@@ -159,7 +220,7 @@ def test_ledger_root_hash_embedded_when_supplied():
     dossier = generate_dossier(
         _make_manifest(), _make_risk_result(), ledger_root_hash=root
     )
-    assert dossier.section4.ledger_root_hash == root
+    assert dossier.record_keeping.ledger_root_hash == root
 
 
 def test_signature_status_unsigned_by_default():
@@ -187,7 +248,7 @@ def test_signature_status_ed25519_when_pro_key_configured(tmp_path):
     """Ed25519 (Pro) path takes precedence over HMAC and is verifiable."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from opencomplai_core.signing import verify_bundle_bytes
+    from opencomplai_core.signing import SigningDomain, verify_bundle_bytes
 
     private_key = Ed25519PrivateKey.generate()
     priv_pem = private_key.private_bytes(
@@ -224,7 +285,17 @@ def test_signature_status_ed25519_when_pro_key_configured(tmp_path):
             }
         )
         assert verify_bundle_bytes(
-            bundle_json.encode("utf-8"), dossier.signature, pub_path
+            bundle_json.encode("utf-8"),
+            dossier.signature,
+            pub_path,
+            SigningDomain.DOSSIER_BUNDLE,
+        )
+        # The same signature must not pass as any other kind of attestation.
+        assert not verify_bundle_bytes(
+            bundle_json.encode("utf-8"),
+            dossier.signature,
+            pub_path,
+            SigningDomain.BADGE,
         )
     finally:
         os.environ.pop("DOSSIER_SIGNING_KEY_PATH", None)

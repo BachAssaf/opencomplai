@@ -25,6 +25,7 @@ from opencomplai_core.scanner.cache import (
     default_detector_versions,
 )
 from opencomplai_core.scanner.constants import SCANNER_VERSION
+from opencomplai_core.scanner.exclusion_audit import audit_exclusions
 from opencomplai_core.scanner.feature_types import FeatureStore, ScanProgressCallback
 from opencomplai_core.scanner.features import ScanConfig, extract_features
 from opencomplai_core.scanner.fusion import fuse_evidence
@@ -151,20 +152,32 @@ def run_detectors(
     features,
     registry=None,
     progress_cb: ScanProgressCallback | None = None,
-) -> list:
+) -> tuple[list[EvidenceItem], list[str]]:
 
     registry = registry or DETECTOR_REGISTRY
     if progress_cb:
         progress_cb.on_phase("detect", len(registry))
     evidence: list[EvidenceItem] = []
+    detector_errors: list[str] = []
     for i, detector in enumerate(registry):
         try:
             evidence.extend(detector.detect(features))
-        except Exception:
+        except Exception as exc:
+            import warnings
+
+            detector_errors.append(
+                f"{detector.detector_id}: {type(exc).__name__}: {exc}"
+            )
+            warnings.warn(
+                f"Detector {detector.detector_id} failed "
+                f"({type(exc).__name__}: {exc}). Its evidence was dropped "
+                "from this scan; the failure is recorded in detector_errors.",
+                stacklevel=2,
+            )
             continue
         if progress_cb:
             progress_cb.on_step("detect", i + 1, detector.detector_id)
-    return evidence
+    return evidence, detector_errors
 
 
 def _load_intent_plugin(model_id: str | None = None):
@@ -446,6 +459,13 @@ def run_scan(
     config: ScanConfig | None = None,
     baseline_ref: str | None = None,
     baseline_categories: list[str] | None = None,
+    #: Previously-accepted .ocignore patterns (SCAN-OCIGNORE). An AI-related
+    #: exclusion that is *new* relative to this is a materially stronger signal
+    #: than a long-standing one, because it is change correlated with an audit.
+    #: `None` means no baseline is available, and nothing is marked new — an
+    #: absent baseline must not read as "everything is new", which would flood
+    #: a first scan and train reviewers to ignore the flags.
+    baseline_ignore_patterns: list[str] | None = None,
     progress_cb: ScanProgressCallback | None = None,
     ai_intent: bool = False,
     ai_model: str | None = None,
@@ -487,8 +507,9 @@ def run_scan(
             detector_versions=default_detector_versions(),
         )
     features = extract_features(inventory, config, cache, progress_cb=progress_cb)
+    raw_evidence, detector_errors = run_detectors(features, progress_cb=progress_cb)
     evidence = sorted(
-        run_detectors(features, progress_cb=progress_cb),
+        raw_evidence,
         key=lambda e: (e.detector_id, e.token_label, e.locations[0]),
     )
 
@@ -591,6 +612,19 @@ def run_scan(
     detector_versions = default_detector_versions()
     cache_summary = cache.summary() if cache else {}
 
+    # SCAN-OCIGNORE (finding 84). `config_hash` already makes the .ocignore
+    # tamper-*evident*; it does not make an exclusion *suspicious*. Flagging
+    # AI-named exclusions -- and marking the ones absent from the baseline --
+    # is what stops "nothing was found" and "we were told not to look there"
+    # from producing the same report. Advisory only: it never changes severity,
+    # because a scanner cannot tell a legitimate `vendor/` exclusion from a
+    # self-serving `src/ml/` one, and only a reviewer can.
+    exclusion_audit = audit_exclusions(
+        patterns,
+        excluded_directories=inventory.excluded_directories,
+        baseline_patterns=baseline_ignore_patterns,
+    )
+
     report = CorroborationReport(
         scan_id=scan_id,
         system_id=system_id,
@@ -611,9 +645,11 @@ def run_scan(
         cache_summary=cache_summary,
         skipped_paths=inventory.skipped_paths,
         skip_reasons=inventory.skip_reasons,
+        excluded_directories=exclusion_audit.excluded_directories,
+        exclusion_flags=exclusion_audit.summary(),
         limits_hit=inventory.limits_hit,
         warnings=inventory.warnings,
-        detector_errors=[],
+        detector_errors=detector_errors,
         scan_errors=list(inventory.limits_hit),
         baseline_ref=baseline_ref,
         generated_at=datetime.now(UTC).isoformat(),
@@ -642,4 +678,5 @@ def scan_summary_from_report(report: CorroborationReport) -> ScanSummary:
         discrepancies=report.discrepancies,
         report_hash=report.report_hash,
         evidence_hashes=[evidence_item_hash(e) for e in report.evidence],
+        detector_errors=list(report.scan_errors) + list(report.detector_errors),
     )

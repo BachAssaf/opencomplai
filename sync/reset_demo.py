@@ -35,12 +35,26 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(__file__))
 
 from demo.systems import DEMO_SYSTEMS
+from opencomplai_core.service_auth import load_shared_secret, mint_service_token
 
 DEFAULT_VAULT = os.environ.get("DEMO_VAULT_URL", "http://localhost:8002")
 DEFAULT_GATEWAY = os.environ.get("DEMO_GATEWAY_URL", "http://localhost:8080")
 DEFAULT_API_KEY = os.environ.get("DEMO_TENANT_API_KEY", "demo-api-key-local")
 
 DEMO_SYSTEM_IDS = [s["system_id"] for s in DEMO_SYSTEMS]
+
+
+def _service_auth_headers() -> dict[str, str]:
+    """
+    evidence-vault requires a signed internal service token on every /v1/*
+    route (SEC-SERVICE-AUTH). This script talks to it directly, so it mints
+    its own token the same way gateway-api does.
+    """
+    secret = load_shared_secret()
+    if secret is None:
+        return {}
+    token = mint_service_token("reset-demo-script", secret)
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +70,7 @@ def _post(url: str, body: dict, *, dry_run: bool) -> dict | None:
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_service_auth_headers()},
         method="POST",
     )
     try:
@@ -77,6 +91,8 @@ def _delete(url: str, *, dry_run: bool) -> dict | None:
         return {"_dry_run": True}
     req = urllib.request.Request(url, method="DELETE")
     req.add_header("Content-Type", "application/json")
+    for name, value in _service_auth_headers().items():
+        req.add_header(name, value)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
@@ -118,7 +134,8 @@ def reset_dossiers(vault: str, *, dry_run: bool) -> None:
             print(f"  [DRY-RUN] GET {list_url} -> (would delete all found dossiers)")
             continue
         try:
-            with urllib.request.urlopen(list_url, timeout=10) as r:
+            list_req = urllib.request.Request(list_url, headers=_service_auth_headers())
+            with urllib.request.urlopen(list_req, timeout=10) as r:
                 dossiers = json.loads(r.read())
         except Exception:
             dossiers = []

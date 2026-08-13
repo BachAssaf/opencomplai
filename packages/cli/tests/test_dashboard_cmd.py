@@ -76,6 +76,10 @@ def isolated_home(tmp_path, monkeypatch):
         "opencomplai_cli.commands.dashboard._LEDGER_FILE",
         opencomplai_dir / "ledger.jsonl",
     )
+    monkeypatch.setattr(
+        "opencomplai_cli.commands.dashboard._CLIENT_SECRET_FILE",
+        opencomplai_dir / "client.secret",
+    )
     return tmp_path
 
 
@@ -117,6 +121,22 @@ def _start_server() -> tuple[HTTPServer, str, dict]:
         close_connection = True
 
         def do_POST(self):
+            # Drain the request body BEFORE responding.
+            #
+            # This is what caused the long-standing WinError 10053 flake. The
+            # handler used to reply and close with the POST body still sitting
+            # unread in the kernel receive buffer. Closing a socket with unread
+            # data makes Windows send an RST rather than a FIN, and the client
+            # then fails with "an established connection was aborted" while
+            # trying to read a response the server had already written. The
+            # race is real but is in the *test server*, not the CLI.
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length:
+                self.rfile.read(length)
+
             path = self.path.split("?")[0]
             status, body = responses.get(path, (404, {"error_code": "NOT_FOUND"}))
             data = json.dumps(body).encode()
@@ -212,6 +232,68 @@ def test_enroll_adds_egress_allowlist_entry() -> None:
     allowlist = _load_egress_allowlist()
     assert "dashboard:t-001" in allowlist
     assert allowlist["dashboard:t-001"]["tenant_id"] == "t-001"
+
+
+def test_enroll_persists_client_credentials_when_returned() -> None:
+    from opencomplai_cli.commands.dashboard import _load_config, _read_client_secret
+
+    _server, base_url, responses = _start_server()
+    responses["/v1/admin/enroll"] = (
+        200,
+        {
+            "audit_event_hash": "sha256:creds",
+            "dashboard_url": base_url,
+            "client_id": "install-abc123",
+            "client_secret": "super-secret-value",
+        },
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "enroll",
+            "--tenant",
+            "t-creds",
+            "--token",
+            "tok-creds",
+            "--dashboard-url",
+            base_url,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = _load_config()
+    assert cfg.get("client_id") == "install-abc123"
+    assert _read_client_secret() == "super-secret-value"
+    assert "super-secret-value" not in result.output
+
+
+def test_enroll_skips_credential_persistence_when_not_returned() -> None:
+    from opencomplai_cli.commands.dashboard import _load_config, _read_client_secret
+
+    _server, base_url, responses = _start_server()
+    responses["/v1/admin/enroll"] = (
+        200,
+        {"audit_event_hash": "sha256:nocreds", "dashboard_url": base_url},
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "enroll",
+            "--tenant",
+            "t-nocreds",
+            "--token",
+            "tok-nocreds",
+            "--dashboard-url",
+            base_url,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = _load_config()
+    assert "client_id" not in cfg
+    assert _read_client_secret() is None
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +441,49 @@ def test_withdraw_removes_egress_allowlist_entry() -> None:
     runner.invoke(app, ["withdraw", "--tenant", "t-005", "--dashboard-url", base_url])
 
     assert "dashboard:t-005" not in _load_egress_allowlist()
+
+
+def test_withdraw_rejected_by_dashboard_does_not_claim_success() -> None:
+    """SEC-2: admin-api's /v1/admin/withdraw now requires an authenticated,
+    tenant-scoped service JWT this CLI does not mint, so a real dashboard
+    call gets 401. Local cleanup still runs (best-effort design), but the
+    command must not print "Withdrawal complete" -- that would tell the
+    user consent was revoked server-side when it was not."""
+    _server, base_url, responses = _start_server()
+    responses["/v1/admin/enroll"] = (
+        200,
+        {"audit_event_hash": "sha256:w-rej", "dashboard_url": base_url},
+    )
+    responses["/v1/admin/withdraw"] = (401, {"message": "missing principal"})
+
+    runner.invoke(
+        app,
+        [
+            "enroll",
+            "--tenant",
+            "t-007",
+            "--token",
+            "tok-w-rej",
+            "--dashboard-url",
+            base_url,
+        ],
+    )
+    assert "dashboard:t-007" in _load_egress_allowlist()
+
+    result = runner.invoke(
+        app, ["withdraw", "--tenant", "t-007", "--dashboard-url", base_url]
+    )
+
+    # Local state still clears -- an install can always stop trusting its
+    # own local config regardless of whether the dashboard is reachable.
+    assert "dashboard:t-007" not in _load_egress_allowlist()
+    events = _ledger_events()
+    revoked = [e for e in events if e.get("event_type") == "consent_revoked"]
+    assert len(revoked) == 1
+
+    combined_output = result.output + str(result.exception or "")
+    assert "Withdrawal complete." not in result.output
+    assert "401" in combined_output or "rejected" in result.output.lower()
 
 
 def test_withdraw_after_enroll_makes_re_enroll_possible() -> None:

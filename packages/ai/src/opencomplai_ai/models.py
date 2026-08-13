@@ -148,6 +148,17 @@ class ModelSpec:
     hf_repo: str
     filename: str
     requires_deep: bool
+    #: Immutable Hugging Face revision (commit SHA or tag). Downloading from
+    #: the default branch means a compromised or taken-over repo silently
+    #: serves altered weights that then execute against customer code
+    #: (AI-EGRESS, finding 77). Empty means unpinned — `ensure_model` refuses
+    #: to download such a spec unless the pin is explicitly waived.
+    revision: str = ""
+    #: Expected sha256 of `filename`, verified after download AND on every
+    #: cache hit. Verifying only on download would let a later local
+    #: modification of the cached file go unnoticed forever. Empty means
+    #: unverified.
+    sha256: str = ""
 
 
 MODEL_CATALOG: dict[str, ModelSpec] = {

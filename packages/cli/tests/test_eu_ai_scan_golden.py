@@ -174,7 +174,12 @@ def test_fixture_scan_json_includes_eu_ai_scan():
         if "manifest not found" in result.output or "Error:" in result.output:
             pytest.fail(result.output)
         pytest.skip(f"AI intent scan unavailable: {result.output[:200]}")
-    data = json.loads(result.output)
+    # Unwrap the versioned ScanOutputEnvelope -- the scan report lives under
+    # `payload`. This assertion used to read the top level, the pre-envelope
+    # shape, and had been failing as a permanent baseline failure since.
+    envelope = json.loads(result.output)
+    assert envelope["schema_version"] == "1.0"
+    data = envelope["payload"]
     assert "eu_ai_scan" in data
     if data["eu_ai_scan"] is not None:
         assert "capabilities" in data["eu_ai_scan"]

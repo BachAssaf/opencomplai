@@ -18,15 +18,18 @@ import os
 import time
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from opencomplai_core.engine import assess
 from opencomplai_core.models import (
     AssessmentInput,
     ModelMetadata,
     SystemManifest,
 )
+from opencomplai_core.service_auth import load_shared_secret, mint_service_token
 from opencomplai_core.telemetry import configure_telemetry, metrics_response
 from pydantic import BaseModel, Field
+
+from opencomplai_doc_generator.service_auth_dependency import require_service_principal
 
 try:
     from prometheus_client import Counter as _Counter
@@ -54,6 +57,35 @@ app = FastAPI(
 )
 
 configure_telemetry("doc-generator")
+
+# Every /v1/* route requires a valid internal service token (SEC-SERVICE-AUTH) —
+# only /health and /metrics stay reachable without one.
+router = APIRouter(dependencies=[Depends(require_service_principal)])
+
+
+_OSS_DEFAULT_TENANT_ID = "oss-default"
+
+
+def get_tenant_id(x_tenant_id: str | None = Header(default=None)) -> str:
+    """
+    Forward the tenant gateway-api resolved for the inbound request
+    (TEN-VAULT) — doc-generator does not resolve tenancy itself, it only
+    relays the caller's X-Tenant-Id header on to evidence-vault so ledger
+    writes and dossier-index rows land in the right tenant's RLS scope.
+    """
+    if x_tenant_id is None or x_tenant_id.strip() == "":
+        return _OSS_DEFAULT_TENANT_ID
+    return x_tenant_id
+
+
+def _evidence_vault_headers(tenant_id: str) -> dict[str, str]:
+    """Signed service-token + X-Tenant-Id headers for calls to evidence-vault."""
+    headers: dict[str, str] = {"X-Tenant-Id": tenant_id}
+    secret = load_shared_secret()
+    if secret is not None:
+        token = mint_service_token("doc-generator", secret)
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 class GenerateDocsRequest(BaseModel):
@@ -101,18 +133,20 @@ class DossierSummary(BaseModel):
     created_at: str
 
 
-async def _fetch_ledger_root() -> str | None:
+async def _fetch_ledger_root(tenant_id: str) -> str | None:
     """
     Read the current Merkle chain tip from the evidence-vault.
 
-    Returned hash is embedded in `section4.ledger_root_hash` so the dossier
+    Returned hash is embedded in `record_keeping.ledger_root_hash` so the dossier
     self-anchors to ledger state at issuance time. Returns None on any
     upstream failure so dossier generation degrades gracefully — the
-    section4 field documents this case as a null value.
+    record_keeping field documents this case as a null value.
     """
     try:
         async with httpx.AsyncClient(
-            base_url=EVIDENCE_VAULT_URL, timeout=5.0
+            base_url=EVIDENCE_VAULT_URL,
+            timeout=5.0,
+            headers=_evidence_vault_headers(tenant_id),
         ) as client:
             resp = await client.get("/v1/evidence/ledger-root")
             if resp.status_code >= 400:
@@ -128,6 +162,7 @@ async def _persist_dossier(
     system_id: str,
     commit_ref: str,
     bundle_checksum: str,
+    tenant_id: str,
 ) -> tuple[str, str]:
     """
     Write the dossier to the evidence-vault CAS, append a ledger event, and
@@ -136,7 +171,11 @@ async def _persist_dossier(
     Best-effort: any failure here is raised as a 502 to the caller so the
     customer learns the dossier was generated but not persisted.
     """
-    async with httpx.AsyncClient(base_url=EVIDENCE_VAULT_URL, timeout=10.0) as client:
+    async with httpx.AsyncClient(
+        base_url=EVIDENCE_VAULT_URL,
+        timeout=10.0,
+        headers=_evidence_vault_headers(tenant_id),
+    ) as client:
         content_b64 = base64.b64encode(dossier_json.encode("utf-8")).decode("ascii")
         cas_resp = await client.post(
             "/v1/evidence/objects",
@@ -216,8 +255,10 @@ async def metrics():
     return response
 
 
-@app.post("/v1/docs/generate", response_model=GenerateDocsResponse)
-async def generate_docs(request: GenerateDocsRequest) -> GenerateDocsResponse:
+@router.post("/v1/docs/generate", response_model=GenerateDocsResponse)
+async def generate_docs(
+    request: GenerateDocsRequest, tenant_id: str = Depends(get_tenant_id)
+) -> GenerateDocsResponse:
     """
     Generate an Annex IV technical documentation dossier (REQ-DOC-001).
 
@@ -261,7 +302,7 @@ async def generate_docs(request: GenerateDocsRequest) -> GenerateDocsResponse:
         # of older ledger events becomes detectable by re-fetching the root
         # and comparing. Best-effort: if the vault is unreachable we still
         # emit a dossier, just without the anchor.
-        ledger_root_hash = await _fetch_ledger_root()
+        ledger_root_hash = await _fetch_ledger_root(tenant_id)
 
         dossier = generate_dossier(
             manifest=manifest,
@@ -279,6 +320,7 @@ async def generate_docs(request: GenerateDocsRequest) -> GenerateDocsResponse:
             system_id=request.system_id,
             commit_ref=request.commit_ref,
             bundle_checksum=dossier.bundle_checksum or "",
+            tenant_id=tenant_id,
         )
 
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -311,15 +353,21 @@ async def generate_docs(request: GenerateDocsRequest) -> GenerateDocsResponse:
         ) from exc
 
 
-@app.get("/v1/docs/{dossier_id}")
-async def get_dossier(dossier_id: str) -> dict:
+@router.get("/v1/docs/{dossier_id}")
+async def get_dossier(
+    dossier_id: str, tenant_id: str = Depends(get_tenant_id)
+) -> dict:
     """
     Retrieve a previously generated dossier by id.
 
     Returns the dossier JSON together with the index metadata that lets the
     caller verify the bundle_checksum and trace the anchoring ledger event.
     """
-    async with httpx.AsyncClient(base_url=EVIDENCE_VAULT_URL, timeout=10.0) as client:
+    async with httpx.AsyncClient(
+        base_url=EVIDENCE_VAULT_URL,
+        timeout=10.0,
+        headers=_evidence_vault_headers(tenant_id),
+    ) as client:
         idx_resp = await client.get(f"/v1/dossiers/{dossier_id}")
         if idx_resp.status_code == 404:
             raise HTTPException(
@@ -372,10 +420,16 @@ async def get_dossier(dossier_id: str) -> dict:
     }
 
 
-@app.get("/v1/docs")
-async def list_dossiers(system_id: str) -> dict:
+@router.get("/v1/docs")
+async def list_dossiers(
+    system_id: str, tenant_id: str = Depends(get_tenant_id)
+) -> dict:
     """List all dossiers stored for a given system_id, newest first."""
-    async with httpx.AsyncClient(base_url=EVIDENCE_VAULT_URL, timeout=10.0) as client:
+    async with httpx.AsyncClient(
+        base_url=EVIDENCE_VAULT_URL,
+        timeout=10.0,
+        headers=_evidence_vault_headers(tenant_id),
+    ) as client:
         resp = await client.get("/v1/dossiers", params={"system_id": system_id})
         if resp.status_code >= 400:
             raise HTTPException(
@@ -387,3 +441,6 @@ async def list_dossiers(system_id: str) -> dict:
                 },
             )
         return resp.json()
+
+
+app.include_router(router)

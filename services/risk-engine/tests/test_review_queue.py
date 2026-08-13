@@ -5,25 +5,21 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 from opencomplai_core.models import ReviewReason
-from opencomplai_risk_engine import main as risk_main
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_risk_engine.main import app
 from opencomplai_risk_engine.review_queue import (
-    _REVIEW_ITEMS,
     build_redacted_context,
     enqueue_review,
 )
 
 
 @pytest.fixture(autouse=True)
-def _clear_queue():
-    _REVIEW_ITEMS.clear()
-    risk_main._ACCEPTED_OVERRIDES.clear()
+def _clear_queue(fake_vault):
     yield
-    _REVIEW_ITEMS.clear()
-    risk_main._ACCEPTED_OVERRIDES.clear()
+    fake_vault.clear()
 
 
-def test_enqueue_idempotent():
+def test_enqueue_idempotent(fake_vault):
     ctx = build_redacted_context(
         "x", ReviewReason.EVALUATOR_FAIL, detector_ids=["EVAL_SAFETY"]
     )
@@ -47,14 +43,18 @@ def test_enqueue_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_list_queue_after_eval_fail():
+async def test_list_queue_after_eval_fail(fake_vault):
     with patch(
         "opencomplai_risk_engine.main._record_hitl_event",
         new_callable=AsyncMock,
         return_value="evt",
     ):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={
+                "Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"
+            },
         ) as client:
             await client.post(
                 "/v1/evals/run",

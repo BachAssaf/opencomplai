@@ -1,18 +1,18 @@
 """Fail-closed HITL ledger writes (Workstream B.4)."""
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from opencomplai_risk_engine import main as risk_main
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_risk_engine.main import app
 
 
 @pytest.fixture(autouse=True)
-def _clear_idempotency_cache():
-    risk_main._ACCEPTED_OVERRIDES.clear()
+def _clear_idempotency_cache(fake_vault):
     yield
-    risk_main._ACCEPTED_OVERRIDES.clear()
+    fake_vault.clear()
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,9 @@ async def test_override_vault_failure_returns_503_not_201():
         return_value=None,
     ):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
         ) as client:
             r = await client.post(
                 "/v1/hitl/overrides",
@@ -47,7 +49,9 @@ async def test_override_succeeds_only_when_vault_writes():
         return_value="evt_test_001",
     ):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
         ) as client:
             r = await client.post(
                 "/v1/hitl/overrides",
@@ -77,7 +81,9 @@ async def test_override_idempotency_retry_returns_same_response():
         return_value="evt_idem",
     ):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
         ) as client:
             r1 = await client.post("/v1/hitl/overrides", json=payload)
             r2 = await client.post("/v1/hitl/overrides", json=payload)
@@ -94,7 +100,9 @@ async def test_override_idempotency_conflict_returns_409():
         return_value="evt_conflict",
     ):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
         ) as client:
             await client.post(
                 "/v1/hitl/overrides",

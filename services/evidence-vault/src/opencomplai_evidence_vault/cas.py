@@ -18,8 +18,25 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+# Canonical content-hash format: exactly the "sha256:" prefix plus 64 lowercase
+# hex digits. Anything else (traversal segments, unexpected length, uppercase,
+# etc.) must never reach a filesystem or blob-store operation.
+CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def validate_content_hash(content_hash: str) -> str:
+    """Return ``content_hash`` unchanged if it is a well-formed CAS hash.
+
+    Raises ``ValueError`` otherwise. Must be called before any filesystem or
+    blob-store path is derived from caller-supplied input.
+    """
+    if not CONTENT_HASH_RE.match(content_hash):
+        raise ValueError(f"Invalid content hash format: {content_hash!r}")
+    return content_hash
 
 
 class CASBackend(ABC):
@@ -46,8 +63,16 @@ class LocalCASBackend(CASBackend):
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path_for(self, content_hash: str) -> Path:
-        prefix = content_hash.replace("sha256:", "")[:2]
-        return self.base_dir / prefix / content_hash.replace("sha256:", "")
+        validate_content_hash(content_hash)
+        digest = content_hash.removeprefix("sha256:")
+        dest = (self.base_dir / digest[:2] / digest).resolve()
+
+        # Defense in depth: the regex above already rules out traversal
+        # segments in `digest`, but never derive a path we haven't confirmed
+        # stays under base_dir.
+        if not dest.is_relative_to(self.base_dir.resolve()):
+            raise ValueError(f"Resolved path escapes base_dir: {content_hash!r}")
+        return dest
 
     def write(self, content: bytes) -> str:
         digest = hashlib.sha256(content).hexdigest()
@@ -100,7 +125,8 @@ class VercelBlobCASBackend(CASBackend):
         self._blob = vercel_blob
 
     def _key(self, content_hash: str) -> str:
-        hex_part = content_hash.replace("sha256:", "")
+        validate_content_hash(content_hash)
+        hex_part = content_hash.removeprefix("sha256:")
         return f"{self._BLOB_PREFIX}{hex_part[:2]}/{hex_part}"
 
     def write(self, content: bytes) -> str:

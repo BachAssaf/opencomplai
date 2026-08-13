@@ -165,7 +165,7 @@ Framework glue (`APIRouter`, `ASGITransport`, `Depends`, `TestClient`) and other
 
 ### Scan scope
 
-For production assessments, point `--repo-root` at your deployed service (for example `dashboard-saas/`) rather than the entire monorepo. Add demo paths such as `examples/` to [`.ocignore`](../../.ocignore) so sample fixtures do not affect your system's results. Set `intended_purpose` in `system-manifest.json` to describe **your** system — not a sample credit-scoring manifest.
+For production assessments, point `--repo-root` at your deployed service (for example `dashboard-saas/`) rather than the entire monorepo. Add demo paths such as `examples/` to [`.ocignore`](#ocignore) so sample fixtures do not affect your system's results. Set `intended_purpose` in `system-manifest.json` to describe **your** system — not a sample credit-scoring manifest.
 
 ### Flags
 

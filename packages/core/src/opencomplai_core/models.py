@@ -82,7 +82,11 @@ class ModelMetadata(BaseModel):
     name: str = Field(..., description="Human-readable model name")
     version: str = Field(..., description="Model version identifier")
     modality: str = Field(..., description="e.g. text, image, multimodal")
-    use_case: str = Field(..., description="Primary intended use case")
+    use_case: str = Field(
+        ...,
+        max_length=2000,
+        description="Primary intended use case",
+    )
     deployment_context: str = Field(
         ..., description="e.g. production, research, internal"
     )
@@ -284,12 +288,25 @@ class EvidenceObject(BaseModel):
     """
     An immutable content-addressable evidence object stored in the local CAS.
     Implemented in full in Phase 8 (Evidence Vault).
+
+    **Objects are stored as plaintext.** Integrity is enforced by re-hashing the
+    stored bytes on read and comparing against the content hash; confidentiality
+    is delegated to volume- or bucket-level encryption at the deployment layer.
+
+    This model used to carry ``encryption_profile: str`` described as
+    "AES-256-GCM | none". No CAS backend has ever encrypted anything, nothing
+    ever set the field, and nothing ever read it — so the only thing it did was
+    tell an auditor reading the schema (or the generated OpenAPI, where the
+    description surfaced) that a control existed which did not. It has been
+    removed rather than left to mislead. If encryption at rest is built later it
+    will arrive as an explicit design — ciphertext storage needs a key-management
+    decision this project has not made, and it changes what a "content hash"
+    addresses — not by reinstating this field.
     """
 
     evidence_id: str
     content_hash: str = Field(..., description="SHA-256; also the CAS storage key")
     storage_uri: str = Field(..., description="Local file path or URI")
-    encryption_profile: str = Field(..., description="AES-256-GCM | none")
 
 
 class VerificationTask(BaseModel):
@@ -694,6 +711,22 @@ class CorroborationReport(BaseModel):
     cache_summary: dict[str, int]
     skipped_paths: list[str]
     skip_reasons: dict[str, int] = Field(default_factory=dict)
+    excluded_directories: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Directory prefixes pruned by an .ocignore pattern (SCAN-OCIGNORE). "
+            "Previously discarded entirely, which made excluding the exact tree "
+            "under audit produce a report identical to a genuinely clean one."
+        ),
+    )
+    exclusion_flags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Heuristic notices about .ocignore patterns that name AI-related "
+            "paths. Advisory, never a verdict: a reviewer decides whether an "
+            "exclusion is legitimate. Newly-added ones are labelled as such."
+        ),
+    )
     limits_hit: list[str]
     warnings: list[str]
     detector_errors: list[str]
@@ -740,6 +773,14 @@ class ScanSummary(BaseModel):
     report_hash: str
     evidence_hashes: list[str] = Field(
         default_factory=list, description="SHA-256 hashes of evidence objects"
+    )
+    detector_errors: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Detector/scan failures from the full report, carried forward so a "
+            "receiving server can tell severity:none apart from an incomplete "
+            "scan rather than seeing only a passing severity."
+        ),
     )
 
 

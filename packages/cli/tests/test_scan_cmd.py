@@ -65,7 +65,22 @@ def test_scan_json_output_shape(tmp_path):
         ],
     )
     assert result.exit_code == 0
-    data = json.loads(result.output)
+    envelope = json.loads(result.output)
+
+    # `scan --output json` emits a versioned ScanOutputEnvelope; the report
+    # lives under `payload`. This test previously asserted the report keys at
+    # the top level, which is the shape from before the envelope was
+    # introduced -- so it had been failing ever since, as a permanent baseline
+    # failure, while nothing anywhere pinned the envelope contract itself.
+    # Both halves are asserted now.
+    assert envelope["schema_version"] == "1.0"
+    assert envelope["tool_name"] == "opencomplai"
+    assert envelope["tool_version"]
+    assert envelope["generated_at"]
+    assert envelope["disclaimer"]
+    assert envelope["scan_errors"] == []
+
+    data = envelope["payload"]
     assert "severity" in data
     assert "report_hash" in data
     assert "discrepancies" in data
@@ -109,6 +124,140 @@ def test_check_scan_without_fail_on_preserves_pass_exit(tmp_path):
         ],
     )
     assert result.exit_code == 0
+
+
+class _RaisingDetector:
+    """Fixture detector that always crashes — for fail-closed regression tests."""
+
+    detector_id = "DET_FAKE_RAISING_V1"
+
+    def detect(self, features):
+        raise RuntimeError("synthetic detector crash")
+
+
+def _clean_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "clean-repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    return repo
+
+
+def test_check_fail_on_major_exits_zero_when_no_detector_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    manifest = _write_manifest(tmp_path)
+    repo = _clean_repo(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--manifest",
+            str(manifest),
+            "--repo-root",
+            str(repo),
+            "--scan",
+            "--fail-on",
+            "major",
+        ],
+    )
+    assert result.exit_code == 0
+    artifact = json.loads((tmp_path / "compliance-artifact.json").read_text())
+    assert "CODE_CORROBORATION_GAP" not in artifact["failed_controls"]
+
+
+def test_check_fail_on_major_exits_nonzero_when_a_detector_crashes(
+    tmp_path, monkeypatch
+):
+    import opencomplai_core.scan_engine as scan_engine_module
+
+    monkeypatch.setattr(
+        scan_engine_module,
+        "DETECTOR_REGISTRY",
+        [*scan_engine_module.DETECTOR_REGISTRY, _RaisingDetector()],
+    )
+    monkeypatch.chdir(tmp_path)
+    manifest = _write_manifest(tmp_path)
+    repo = _clean_repo(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--manifest",
+            str(manifest),
+            "--repo-root",
+            str(repo),
+            "--scan",
+            "--fail-on",
+            "major",
+        ],
+    )
+    assert result.exit_code == 1
+    artifact = json.loads((tmp_path / "compliance-artifact.json").read_text())
+    assert "CODE_CORROBORATION_GAP" in artifact["failed_controls"]
+
+
+def test_check_default_fail_on_still_exits_nonzero_when_a_detector_crashes(
+    tmp_path, monkeypatch
+):
+    """Fail-closed default: a detector crash must fail the scan even when the
+    caller passes no --fail-on flag at all (default: none for severity
+    gating). A crashed detector means the scan's evidence is incomplete, not
+    that its findings cleared the (unset) severity bar."""
+    import opencomplai_core.scan_engine as scan_engine_module
+
+    monkeypatch.setattr(
+        scan_engine_module,
+        "DETECTOR_REGISTRY",
+        [*scan_engine_module.DETECTOR_REGISTRY, _RaisingDetector()],
+    )
+    monkeypatch.chdir(tmp_path)
+    manifest = _write_manifest(tmp_path)
+    repo = _clean_repo(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--manifest",
+            str(manifest),
+            "--repo-root",
+            str(repo),
+            "--scan",
+        ],
+    )
+    assert result.exit_code == 1
+    artifact = json.loads((tmp_path / "compliance-artifact.json").read_text())
+    assert "CODE_CORROBORATION_GAP" in artifact["failed_controls"]
+
+
+def test_scan_summary_carries_detector_errors_for_the_gateway(tmp_path, monkeypatch):
+    """The compact ScanSummary embedded in the artifact must carry the
+    detector-error signal forward — a receiving server previously saw only a
+    passing severity with no way to tell a clean scan from an incomplete one."""
+    import opencomplai_core.scan_engine as scan_engine_module
+
+    monkeypatch.setattr(
+        scan_engine_module,
+        "DETECTOR_REGISTRY",
+        [*scan_engine_module.DETECTOR_REGISTRY, _RaisingDetector()],
+    )
+    monkeypatch.chdir(tmp_path)
+    manifest = _write_manifest(tmp_path)
+    repo = _clean_repo(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--manifest",
+            str(manifest),
+            "--repo-root",
+            str(repo),
+            "--scan",
+        ],
+    )
+    assert result.exit_code == 1
+    artifact = json.loads((tmp_path / "compliance-artifact.json").read_text())
+    scan_block = artifact["scan_summary"]
+    assert scan_block is not None
+    assert any("DET_FAKE_RAISING_V1" in err for err in scan_block["detector_errors"])
 
 
 def test_scan_human_output_shows_token_annotation(tmp_path):

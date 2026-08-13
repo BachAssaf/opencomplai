@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_evidence_vault.badges import _BadgeBase
 from opencomplai_evidence_vault.bias_alerts import _Base as _BiasBase
 from opencomplai_evidence_vault.cas import CASStore
@@ -13,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest_asyncio.fixture
-async def client(tmp_path):
+async def client(tmp_path, _service_token_secret):
     db_path = tmp_path / "test-dossier-index.db"
     cas_path = tmp_path / "cas"
     cas_path.mkdir()
@@ -32,7 +35,9 @@ async def client(tmp_path):
     app.state.cas = CASStore(str(cas_path))
 
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', os.environ['INTERNAL_SERVICE_TOKEN_SECRET'])}"},
     ) as ac:
         yield ac
 

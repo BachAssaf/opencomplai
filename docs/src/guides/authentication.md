@@ -1,14 +1,17 @@
 # Authentication
 
-## No API key model (by design)
+## Fail-closed by default
 
-Opencomplai does **not** use API keys, `Authorization` headers, or JWT tokens in the OSS gateway API. The Docker Compose stack runs within your own infrastructure and trusts callers on the local network by design.
+The gateway API authenticates every non-health request and fails closed: it refuses to start unless you configure one of two supported authentication modes, or explicitly opt out for local development.
 
-This is intentional: the OSS compliance toolkit is a local/CI tool. Access control is provided by:
+| Mode | When to use | Env var |
+|---|---|---|
+| API-key | Self-hosted, single-operator | `OPENCOMPLAI_API_KEY` |
+| OIDC JWT | Multi-user / SaaS | `OIDC_JWKS_URI` |
 
-1. **Network isolation** — the gateway API (`localhost:8080`) should not be exposed to the public internet.
-2. **Signing keypairs** — artifact authenticity is proven by Ed25519 signatures, not by API-level auth.
-3. **Egress allowlist** — outbound traffic is restricted to declared destinations by the egress proxy.
+If neither variable is set, the gateway logs `Gateway refusing to start: OPENCOMPLAI_API_KEY is not set...` and exits rather than accepting unauthenticated traffic. The only way to run without auth is to explicitly set `OPENCOMPLAI_AUTH_DISABLED=1`, which is meant for local development only and is not safe for production use.
+
+For the full configuration steps, environment variables, and identity-provider examples, see [Deployment › Authentication](../deployment/authentication.md).
 
 ## Dashboard authentication (Premium)
 

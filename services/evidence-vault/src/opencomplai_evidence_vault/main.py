@@ -13,13 +13,16 @@ import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 from alembic import command
 from alembic.config import Config
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import Response
 from opencomplai_core.telemetry import configure_telemetry, metrics_response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from opencomplai_evidence_vault.badges import (
@@ -33,7 +36,19 @@ from opencomplai_evidence_vault.bias_alerts import (
     purge_expired_bias_data,
     store_bias_alert,
 )
-from opencomplai_evidence_vault.cas import CASStore, get_cas_backend
+from opencomplai_evidence_vault.cas import CONTENT_HASH_RE, CASStore, get_cas_backend
+from opencomplai_evidence_vault.hitl import (
+    get_accepted_override,
+    get_completed_eval,
+    get_review_context,
+    get_review_item,
+    list_review_items,
+    store_accepted_override,
+    store_completed_eval,
+    store_review_context,
+    summarize_review_items,
+    upsert_review_item,
+)
 
 try:
     from prometheus_client import Counter as _Counter
@@ -69,10 +84,16 @@ from opencomplai_evidence_vault.ledger import (
     get_chain_tip,
     verify_chain,
 )
+from opencomplai_evidence_vault.models import OSS_DEFAULT_TENANT_ID, DossierIndexDB
 from opencomplai_evidence_vault.models import Base as _LedgerBase
-from opencomplai_evidence_vault.models import DossierIndexDB
+from opencomplai_evidence_vault.service_auth_dependency import require_service_principal
 
 configure_telemetry("evidence-vault")
+
+
+def _escape_xml(value: str) -> str:
+    """Escape a value for safe interpolation into XML/SVG markup (incl. quotes)."""
+    return _xml_escape(str(value), {'"': "&quot;", "'": "&apos;"})
 
 
 def _to_async_database_url(database_url: str) -> str:
@@ -103,9 +124,51 @@ def _run_migrations(database_url: str) -> None:
     command.upgrade(cfg, "head")
 
 
+def get_tenant_id(x_tenant_id: str | None = Header(default=None)) -> str:
+    """
+    Resolve the calling tenant from the X-Tenant-Id header, set by
+    gateway-api's proxyToService (sourced from the gateway-verified JWT
+    principal's tenant_id) or by a Python service forwarding its own
+    incoming tenant_id when it calls evidence-vault directly.
+
+    Defaults to OSS_DEFAULT_TENANT_ID when absent — the CLI's direct
+    evidence-vault use and any other tenant-unaware caller land in a single
+    shared OSS namespace rather than being rejected (TEN-VAULT is additive
+    for OSS/self-hosted mode, not a breaking change).
+    """
+    if x_tenant_id is None or x_tenant_id.strip() == "":
+        return OSS_DEFAULT_TENANT_ID
+    return x_tenant_id
+
+
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
     async_session: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     async with async_session() as session:
+        yield session
+
+
+async def get_tenant_session(
+    request: Request, tenant_id: str = Depends(get_tenant_id)
+) -> AsyncGenerator[AsyncSession, None]:
+    """
+    Like get_session, but on Postgres also SET ROLEs to evidence_vault_app
+    and sets the app.tenant_id GUC for the transaction, so RLS policies
+    (migration 0004) enforce the fence even if a route forgets to filter by
+    tenant_id explicitly. Mirrors dashboard_db.session.tenant_session.
+
+    On SQLite (unit tests), the GUC set is a silent no-op — tenant isolation
+    there is enforced purely by every DAO/route filtering on tenant_id, same
+    as dashboard_db's tests rely on tests/test_rls_postgres.py to be the
+    authoritative RLS check.
+    """
+    async_session: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
+    async with async_session() as session:
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            await session.execute(text("SET ROLE evidence_vault_app"))
+            await session.execute(
+                text("SELECT set_config('app.tenant_id', :tid, true)"),
+                {"tid": tenant_id},
+            )
         yield session
 
 
@@ -128,7 +191,12 @@ class AppendEventResponse(BaseModel):
 
 
 class IssueBadgeRequest(BaseModel):
-    system_id: str
+    # system_id is persisted verbatim and later interpolated into the badge
+    # SVG (see badge_svg_endpoint) — constrain it to a safe charset here so
+    # no future rendering surface has to remember to escape it correctly.
+    system_id: str = Field(
+        ..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$"
+    )
     bundle_checksum: str
     artifact: dict
     signature: str | None = None
@@ -183,6 +251,57 @@ class PurgeBiasDataRequest(BaseModel):
     retention_days: int = 90
 
 
+class ReviewItemUpsertRequest(BaseModel):
+    """
+    Upsert a review-item row. risk-engine keeps ownership of the business
+    rules (round-robin group assignment, dual-approval gating, transition
+    validity) and sends the fully-computed row here to persist — this
+    endpoint is a durable dict replacement, not a second copy of the logic.
+    """
+
+    review_id: str
+    system_id: str
+    commit_ref: str
+    reason: str
+    state: str
+    payload_ref: str
+    context_ref: str
+    reviewer_group: str | None = None
+    assigned_to: str | None = None
+    idempotency_key: str
+    created_at: str
+    expires_at: str | None = None
+    decided_at: str | None = None
+    linked_override_id: str | None = None
+
+
+class ReviewContextStoreRequest(BaseModel):
+    context_ref: str
+    context_json: dict
+
+
+class AcceptedOverrideLookupResponse(BaseModel):
+    found: bool
+    payload_fingerprint: str | None = None
+    response_json: dict | None = None
+
+
+class AcceptedOverrideStoreRequest(BaseModel):
+    idempotency_key: str
+    payload_fingerprint: str
+    response_json: dict
+
+
+class CompletedEvalLookupResponse(BaseModel):
+    found: bool
+    result_json: dict | None = None
+
+
+class CompletedEvalStoreRequest(BaseModel):
+    eval_run_id: str
+    result_json: dict
+
+
 class StoreObjectResponse(BaseModel):
     content_hash: str
     storage_uri: str
@@ -229,10 +348,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # dossier_index is also covered by migration 0002 for prod; create_all is idempotent.
     async with engine.begin() as conn:
         from opencomplai_evidence_vault.bias_alerts import _Base as _BiasBase
+        from opencomplai_evidence_vault.hitl import _Base as _HitlBase
 
         await conn.run_sync(_BiasBase.metadata.create_all)
         await conn.run_sync(_BadgeBase.metadata.create_all)
         await conn.run_sync(_LedgerBase.metadata.create_all)
+        await conn.run_sync(_HitlBase.metadata.create_all)
 
     app.state.engine = engine
     app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
@@ -255,6 +376,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Every /v1/* route requires a valid internal service token (SEC-SERVICE-AUTH) —
+    # only /health and /metrics stay reachable without one, for compose/k8s healthchecks
+    # and the Prometheus scraper, neither of which can present a service token.
+    router = APIRouter(dependencies=[Depends(require_service_principal)])
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok", "service": "evidence-vault"}
@@ -269,18 +395,20 @@ def create_app() -> FastAPI:
             )
         return response
 
-    @app.post(
+    @router.post(
         "/v1/evidence/events", response_model=AppendEventResponse, status_code=201
     )
     async def append_ledger_event(
         request_body: AppendEventRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> AppendEventResponse:
         event = await append_event(
             session=session,
             event_type=request_body.event_type,
             payload=request_body.payload,
             signer_id=request_body.signer_id,
+            tenant_id=tenant_id,
         )
         await session.commit()
         return AppendEventResponse(
@@ -289,16 +417,18 @@ def create_app() -> FastAPI:
             prev_hash=event.prev_hash,
         )
 
-    @app.get("/v1/evidence/verify-chain")
+    @router.get("/v1/evidence/verify-chain")
     async def verify_ledger_chain(
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
-        valid = await verify_chain(session)
+        valid = await verify_chain(session, tenant_id=tenant_id)
         return {"valid": valid}
 
-    @app.get("/v1/evidence/ledger-root")
+    @router.get("/v1/evidence/ledger-root")
     async def get_ledger_root(
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """
         Return the current Merkle chain tip — the hash an Annex IV dossier
@@ -306,15 +436,16 @@ def create_app() -> FastAPI:
         detected by comparing the dossier's recorded root against a fresh
         verify-chain run.
         """
-        root = await get_chain_tip(session)
+        root = await get_chain_tip(session, tenant_id=tenant_id)
         return {"ledger_root_hash": root}
 
-    @app.get("/v1/evidence/ledger-history-tips")
+    @router.get("/v1/evidence/ledger-history-tips")
     async def get_ledger_history_tips(
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """
-        Return the rolling Merkle tip after every event in the ledger.
+        Return the rolling Merkle tip after every event in the tenant's ledger.
 
         Used by the verify-ledger tool to confirm that a dossier's recorded
         ledger_root_hash corresponds to a real historical point in the chain.
@@ -324,10 +455,10 @@ def create_app() -> FastAPI:
         WARNING: this endpoint materialises the full chain in memory.  For
         ledgers with millions of events, add pagination or a streaming variant.
         """
-        tips = await compute_history_tips(session)
+        tips = await compute_history_tips(session, tenant_id=tenant_id)
         return {"tips": tips, "count": len(tips)}
 
-    @app.post(
+    @router.post(
         "/v1/evidence/objects", response_model=StoreObjectResponse, status_code=201
     )
     async def store_evidence_object(
@@ -347,8 +478,14 @@ def create_app() -> FastAPI:
             storage_uri=str(cas._path_for(content_hash)),
         )
 
-    @app.get("/v1/evidence/objects/{content_hash:path}")
+    @router.get("/v1/evidence/objects/{content_hash:path}")
     async def get_evidence_object(content_hash: str, request: Request) -> dict:
+        if not CONTENT_HASH_RE.match(content_hash):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid content hash format: {content_hash!r}",
+            )
+
         cas: CASStore = request.app.state.cas
         try:
             content = cas.read(content_hash)
@@ -372,12 +509,17 @@ def create_app() -> FastAPI:
     # index lets callers find it by dossier_id or system_id.
     # ------------------------------------------------------------------
 
-    @app.post("/v1/dossiers", response_model=DossierIndexEntry, status_code=201)
+    @router.post("/v1/dossiers", response_model=DossierIndexEntry, status_code=201)
     async def store_dossier_index(
         request_body: StoreDossierIndexRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> DossierIndexEntry:
-        existing = await session.get(DossierIndexDB, request_body.dossier_id)
+        existing_stmt = select(DossierIndexDB).where(
+            DossierIndexDB.dossier_id == request_body.dossier_id,
+            DossierIndexDB.tenant_id == tenant_id,
+        )
+        existing = (await session.execute(existing_stmt)).scalar_one_or_none()
         if existing is not None:
             # Idempotent: same dossier_id may be re-registered with matching content.
             if (
@@ -403,13 +545,45 @@ def create_app() -> FastAPI:
 
         row = DossierIndexDB(
             dossier_id=request_body.dossier_id,
+            tenant_id=tenant_id,
             system_id=request_body.system_id,
             commit_ref=request_body.commit_ref,
             content_hash=request_body.content_hash,
             bundle_checksum=request_body.bundle_checksum,
             ledger_event_id=request_body.ledger_event_id,
         )
-        session.add(row)
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            # A concurrent request for the same dossier_id (primary key) won
+            # the race between our existence check above and this insert.
+            # Re-read and apply the same idempotent-vs-conflicting logic as
+            # the pre-insert check, instead of surfacing a bare 500.
+            existing = (await session.execute(existing_stmt)).scalar_one_or_none()
+            if existing is None:
+                raise
+            if (
+                existing.content_hash != request_body.content_hash
+                or existing.bundle_checksum != request_body.bundle_checksum
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"dossier_id {request_body.dossier_id} already exists with "
+                        f"different content_hash or bundle_checksum"
+                    ),
+                ) from None
+            return DossierIndexEntry(
+                dossier_id=existing.dossier_id,
+                system_id=existing.system_id,
+                commit_ref=existing.commit_ref,
+                content_hash=existing.content_hash,
+                bundle_checksum=existing.bundle_checksum,
+                ledger_event_id=existing.ledger_event_id,
+                created_at=existing.created_at.isoformat(),
+            )
         await session.commit()
         await session.refresh(row)
         if _METRICS_AVAILABLE:
@@ -424,12 +598,17 @@ def create_app() -> FastAPI:
             created_at=row.created_at.isoformat(),
         )
 
-    @app.get("/v1/dossiers/{dossier_id}", response_model=DossierIndexEntry)
+    @router.get("/v1/dossiers/{dossier_id}", response_model=DossierIndexEntry)
     async def get_dossier_index(
         dossier_id: str,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> DossierIndexEntry:
-        row = await session.get(DossierIndexDB, dossier_id)
+        stmt = select(DossierIndexDB).where(
+            DossierIndexDB.dossier_id == dossier_id,
+            DossierIndexDB.tenant_id == tenant_id,
+        )
+        row = (await session.execute(stmt)).scalar_one_or_none()
         if row is None:
             raise HTTPException(
                 status_code=404, detail=f"Dossier not found: {dossier_id}"
@@ -444,14 +623,18 @@ def create_app() -> FastAPI:
             created_at=row.created_at.isoformat(),
         )
 
-    @app.get("/v1/dossiers")
+    @router.get("/v1/dossiers")
     async def list_dossiers_by_system(
         system_id: str,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         stmt = (
             select(DossierIndexDB)
-            .where(DossierIndexDB.system_id == system_id)
+            .where(
+                DossierIndexDB.system_id == system_id,
+                DossierIndexDB.tenant_id == tenant_id,
+            )
             .order_by(DossierIndexDB.created_at.desc())
         )
         result = await session.execute(stmt)
@@ -477,10 +660,11 @@ def create_app() -> FastAPI:
     # Bias alert endpoints (REQ-GTVG-001/002)
     # ------------------------------------------------------------------
 
-    @app.post("/v1/bias-alerts", status_code=201)
+    @router.post("/v1/bias-alerts", status_code=201)
     async def store_bias_alert_endpoint(
         request_body: StoreBiasAlertRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """Persist a BiasAlert raised by the verification graph."""
         record = await store_bias_alert(
@@ -491,6 +675,7 @@ def create_app() -> FastAPI:
             threshold=request_body.threshold,
             linked_event_id=request_body.linked_event_id,
             system_id=request_body.system_id,
+            tenant_id=tenant_id,
         )
         await session.commit()
         return {
@@ -499,10 +684,11 @@ def create_app() -> FastAPI:
             "created_at": record.created_at.isoformat(),
         }
 
-    @app.post("/v1/admin/purge-bias-data")
+    @router.post("/v1/admin/purge-bias-data")
     async def purge_bias_data_endpoint(
         request_body: PurgeBiasDataRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """
         Delete BiasAlert records older than retention_days (REQ-GTVG-002).
@@ -510,7 +696,9 @@ def create_app() -> FastAPI:
         Internal-only endpoint — not exposed via egress proxy or gateway.
         Appends a bias_data_purge ledger event for auditability.
         """
-        deleted = await purge_expired_bias_data(session, request_body.retention_days)
+        deleted = await purge_expired_bias_data(
+            session, request_body.retention_days, tenant_id=tenant_id
+        )
 
         # Append purge event to the immutable ledger
         await append_event(
@@ -520,32 +708,185 @@ def create_app() -> FastAPI:
                 "retention_days": request_body.retention_days,
                 "deleted_count": deleted,
             },
+            tenant_id=tenant_id,
         )
         await session.commit()
         return {"deleted_count": deleted, "retention_days": request_body.retention_days}
 
-    @app.get("/v1/bias-alerts/count")
+    @router.get("/v1/bias-alerts/count")
     async def count_bias_alerts_endpoint(
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """Return count of stored BiasAlert records (used by purge verification tests)."""
-        count = await count_bias_alerts(session)
+        count = await count_bias_alerts(session, tenant_id=tenant_id)
         return {"count": count}
+
+    # ------------------------------------------------------------------
+    # HITL review-queue, override-idempotency, and eval-cache persistence
+    # (PERSIST-RISK) — risk-engine's durable backing store. risk-engine
+    # keeps its own business logic (assignment, dual-approval, conflict
+    # checks) and calls these endpoints instead of process-local dicts.
+    # ------------------------------------------------------------------
+
+    @router.put("/v1/hitl/review-items", status_code=200)
+    async def upsert_review_item_endpoint(
+        request_body: ReviewItemUpsertRequest,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        try:
+            item = await upsert_review_item(
+                session, request_body.model_dump(), tenant_id=tenant_id
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        await session.commit()
+        return {"item": item}
+
+    @router.get("/v1/hitl/review-items")
+    async def list_review_items_endpoint(
+        state: str | None = None,
+        assigned_to: str | None = None,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        items = await list_review_items(
+            session, tenant_id=tenant_id, state=state, assigned_to=assigned_to
+        )
+        return {"items": items}
+
+    # Declared before /v1/hitl/review-items/{review_id}: FastAPI resolves
+    # paths in declaration order, so the parametrised route would otherwise
+    # swallow "summary" as a review_id and always 404.
+    @router.get("/v1/hitl/review-items/summary")
+    async def summarize_review_items_endpoint(
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        return await summarize_review_items(session, tenant_id=tenant_id)
+
+    @router.get("/v1/hitl/review-items/{review_id}")
+    async def get_review_item_endpoint(
+        review_id: str,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        item = await get_review_item(session, review_id, tenant_id=tenant_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="Review item not found")
+        return {"item": item}
+
+    @router.post("/v1/hitl/review-contexts", status_code=201)
+    async def store_review_context_endpoint(
+        request_body: ReviewContextStoreRequest,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        await store_review_context(
+            session,
+            request_body.context_ref,
+            request_body.context_json,
+            tenant_id=tenant_id,
+        )
+        await session.commit()
+        return {"context_ref": request_body.context_ref}
+
+    @router.get("/v1/hitl/review-contexts/{context_ref}")
+    async def get_review_context_endpoint(
+        context_ref: str,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        context_json = await get_review_context(
+            session, context_ref, tenant_id=tenant_id
+        )
+        if context_json is None:
+            raise HTTPException(status_code=404, detail="Review context not found")
+        return {"context_json": context_json}
+
+    @router.get(
+        "/v1/hitl/overrides/{idempotency_key}",
+        response_model=AcceptedOverrideLookupResponse,
+    )
+    async def lookup_accepted_override_endpoint(
+        idempotency_key: str,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> AcceptedOverrideLookupResponse:
+        cached = await get_accepted_override(
+            session, idempotency_key, tenant_id=tenant_id
+        )
+        if cached is None:
+            return AcceptedOverrideLookupResponse(found=False)
+        fingerprint, response_json = cached
+        return AcceptedOverrideLookupResponse(
+            found=True, payload_fingerprint=fingerprint, response_json=response_json
+        )
+
+    @router.post("/v1/hitl/overrides", status_code=201)
+    async def store_accepted_override_endpoint(
+        request_body: AcceptedOverrideStoreRequest,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        await store_accepted_override(
+            session,
+            request_body.idempotency_key,
+            request_body.payload_fingerprint,
+            request_body.response_json,
+            tenant_id=tenant_id,
+        )
+        await session.commit()
+        return {"idempotency_key": request_body.idempotency_key}
+
+    @router.get(
+        "/v1/evals/cache/{eval_run_id}", response_model=CompletedEvalLookupResponse
+    )
+    async def lookup_completed_eval_endpoint(
+        eval_run_id: str,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> CompletedEvalLookupResponse:
+        result_json = await get_completed_eval(session, eval_run_id, tenant_id=tenant_id)
+        if result_json is None:
+            return CompletedEvalLookupResponse(found=False)
+        return CompletedEvalLookupResponse(found=True, result_json=result_json)
+
+    @router.post("/v1/evals/cache", status_code=201)
+    async def store_completed_eval_endpoint(
+        request_body: CompletedEvalStoreRequest,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        await store_completed_eval(
+            session,
+            request_body.eval_run_id,
+            request_body.result_json,
+            tenant_id=tenant_id,
+        )
+        await session.commit()
+        return {"eval_run_id": request_body.eval_run_id}
 
     # ------------------------------------------------------------------
     # Portfolio — distinct AI systems on record (PRD §5 — Pro)
     # ------------------------------------------------------------------
 
-    @app.get("/v1/portfolio")
+    @router.get("/v1/portfolio")
     async def portfolio_endpoint(
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """
         Return the portfolio of AI systems the vault has on record — one entry
         per distinct system_id, carrying its most recently issued compliance
         badge. Backs the dashboard portfolio view and the demo-smoke check.
         """
-        stmt = select(BadgeDB).order_by(BadgeDB.system_id, BadgeDB.issued_at)
+        stmt = (
+            select(BadgeDB)
+            .where(BadgeDB.tenant_id == tenant_id)
+            .order_by(BadgeDB.system_id, BadgeDB.issued_at)
+        )
         badges = (await session.execute(stmt)).scalars().all()
 
         # Rows are ordered by issued_at ascending, so the last write per
@@ -571,16 +912,18 @@ def create_app() -> FastAPI:
     # Compliance badge endpoints (PRD §5 — Pro)
     # ------------------------------------------------------------------
 
-    @app.post("/v1/pro/badges/issue", status_code=201)
+    @router.post("/v1/pro/badges/issue", status_code=201)
     async def issue_badge_endpoint(
         request_body: IssueBadgeRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """
         Issue a compliance badge for a passing ScanStatusArtifact.
 
-        Idempotent: same (system_id, bundle_checksum) always returns the same badge.
-        Blocked if result != 'pass' or pending_verifications_count != 0.
+        Idempotent: same (tenant_id, system_id, bundle_checksum) always
+        returns the same badge. Blocked if result != 'pass' or
+        pending_verifications_count != 0.
         """
         try:
             badge, created = await issue_badge(
@@ -589,6 +932,7 @@ def create_app() -> FastAPI:
                 bundle_checksum=request_body.bundle_checksum,
                 artifact=request_body.artifact,
                 signature=request_body.signature,
+                tenant_id=tenant_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -604,13 +948,14 @@ def create_app() -> FastAPI:
             "created": created,
         }
 
-    @app.get("/v1/pro/badges/verify/{badge_id:path}")
+    @router.get("/v1/pro/badges/verify/{badge_id:path}")
     async def verify_badge_endpoint(
         badge_id: str,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """Return badge metadata without exposing raw artifact data."""
-        badge = await get_badge(session, badge_id)
+        badge = await get_badge(session, badge_id, tenant_id=tenant_id)
         if badge is None:
             raise HTTPException(status_code=404, detail=f"Badge not found: {badge_id}")
         return {
@@ -622,15 +967,24 @@ def create_app() -> FastAPI:
             "valid": True,
         }
 
-    @app.get("/v1/pro/badges/{badge_id:path}/svg")
+    @router.get("/v1/pro/badges/{badge_id:path}/svg")
     async def badge_svg_endpoint(
         badge_id: str,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> Response:
         """Return an SVG compliance badge asset for embedding in READMEs."""
-        badge = await get_badge(session, badge_id)
+        badge = await get_badge(session, badge_id, tenant_id=tenant_id)
         if badge is None:
             raise HTTPException(status_code=404, detail=f"Badge not found: {badge_id}")
+
+        # Every field below is attacker-influenced (system_id comes straight
+        # from the issue request) and lands inside an HTML comment in a
+        # document served as image/svg+xml — escape unconditionally so a
+        # "-->" breakout can never inject live markup/script.
+        safe_badge_id = _escape_xml(badge.badge_id)
+        safe_system_id = _escape_xml(badge.system_id)
+        safe_issued_at = _escape_xml(badge.issued_at)
 
         svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="200" height="20">
   <linearGradient id="s" x2="0" y2="100%">
@@ -646,24 +1000,33 @@ def create_app() -> FastAPI:
     <text x="160" y="15" fill="#010101" fill-opacity=".3">compliant</text>
     <text x="160" y="14">compliant</text>
   </g>
-  <!-- badge_id: {badge.badge_id} system: {badge.system_id} issued: {badge.issued_at} -->
+  <!-- badge_id: {safe_badge_id} system: {safe_system_id} issued: {safe_issued_at} -->
 </svg>"""
-        return Response(content=svg, media_type="image/svg+xml")
+        return Response(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={
+                "Content-Security-Policy": "default-src 'none'; script-src 'none'",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     # ------------------------------------------------------------------
     # Pro ingest endpoints (REQ-ARC-001 — validated by egress-proxy DLP)
     # ------------------------------------------------------------------
 
-    @app.post("/v1/pro/ingest/status-artifact", status_code=201)
+    @router.post("/v1/pro/ingest/status-artifact", status_code=201)
     async def pro_ingest_status_artifact(
         request_body: ProIngestStatusArtifactRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """Persist a ScanStatusArtifact received from the Pro dashboard ingest pipeline."""
         event = await append_event(
             session=session,
             event_type="pro_status_artifact_ingested",
             payload=request_body.model_dump(exclude_none=False),
+            tenant_id=tenant_id,
         )
         await session.commit()
         if _METRICS_AVAILABLE:
@@ -674,34 +1037,39 @@ def create_app() -> FastAPI:
                 _FIRST_SCAN.labels(system_id=sid).inc()
         return {"event_id": event.event_id, "payload_hash": event.payload_hash}
 
-    @app.post("/v1/pro/ingest/dossier-metadata", status_code=201)
+    @router.post("/v1/pro/ingest/dossier-metadata", status_code=201)
     async def pro_ingest_dossier_metadata(
         request_body: ProIngestDossierRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """Persist dossier metadata received from the egress-proxy sync pipeline."""
         event = await append_event(
             session=session,
             event_type="pro_dossier_metadata_ingested",
             payload=request_body.model_dump(exclude_none=False),
+            tenant_id=tenant_id,
         )
         await session.commit()
         return {"event_id": event.event_id, "payload_hash": event.payload_hash}
 
-    @app.post("/v1/pro/ingest/metrics", status_code=201)
+    @router.post("/v1/pro/ingest/metrics", status_code=201)
     async def pro_ingest_metrics(
         request_body: ProIngestMetricsRequest,
-        session: AsyncSession = Depends(get_session),
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
     ) -> dict:
         """Persist compliance metrics received from the Pro dashboard."""
         event = await append_event(
             session=session,
             event_type="pro_metrics_ingested",
             payload=request_body.model_dump(exclude_none=False),
+            tenant_id=tenant_id,
         )
         await session.commit()
         return {"event_id": event.event_id, "payload_hash": event.payload_hash}
 
+    app.include_router(router)
     return app
 
 

@@ -51,19 +51,21 @@ gunzip -c "$BACKUP_FILE" \
   | docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER" \
     psql -U "$POSTGRES_USER" -d "$TEST_DB" -v ON_ERROR_STOP=1
 
-# Basic schema integrity check — verify core tables exist
+# Schema integrity check — verify the restored schema matches the
+# evidence-vault migration baseline exactly (same table set dr-test.yml checks).
 echo "Verifying schema integrity..."
-TABLES=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER" \
-  psql -U "$POSTGRES_USER" -d "$TEST_DB" -t -c \
-  "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;")
+EXPECTED_TABLES="alembic_version dossier_index evidence_objects ledger_events"
+ACTUAL_TABLES=$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$CONTAINER" \
+  psql -U "$POSTGRES_USER" -d "$TEST_DB" -t -A -c \
+  "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;" \
+  | tr '\n' ' ' | xargs)
 
-for table in audit_events tenants tenant_users ingested_artifacts; do
-  if echo "$TABLES" | grep -q "$table"; then
-    echo "  [OK] Table $table present"
-  else
-    echo "  [WARN] Table $table not found (may not exist in this schema version)"
-  fi
-done
+echo "Expected tables: $EXPECTED_TABLES"
+echo "Actual tables:   $ACTUAL_TABLES"
+if [[ "$ACTUAL_TABLES" != "$EXPECTED_TABLES" ]]; then
+  echo "ERROR: restored schema does not match the evidence-vault migration baseline" >&2
+  exit 1
+fi
 
 echo ""
 echo "Restore test PASSED — backup from $(basename "$BACKUP_FILE") restored successfully."

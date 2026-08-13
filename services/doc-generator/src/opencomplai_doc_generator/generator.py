@@ -18,15 +18,81 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from opencomplai_core.dossier import (
+    PROVIDER_SUPPLIED_PLACEHOLDER,
     AnnexIVDossier,
     AnnexIVSection1,
     AnnexIVSection2,
     AnnexIVSection3,
     AnnexIVSection4,
     AnnexIVSection5,
+    AnnexIVSection6,
+    AnnexIVSection7,
+    AnnexIVSection8,
+    AnnexIVSection9,
+    ArticleTwelveRecordKeeping,
 )
 from opencomplai_core.models import CorroborationReport, RiskResult, SystemManifest
 from opencomplai_core.rules import RULE_SET_VERSION
+
+
+def _manifest_str(manifest: SystemManifest, field: str) -> str | None:
+    """Read an optional provider-attestation field the manifest may not define."""
+    value = getattr(manifest, field, None)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _manifest_list(manifest: SystemManifest, field: str) -> list[str]:
+    value = getattr(manifest, field, None)
+    return list(value) if isinstance(value, (list, tuple)) and value else []
+
+
+def _build_section6(manifest: SystemManifest) -> AnnexIVSection6:
+    """Annex IV pt.6 — relevant changes through the system's lifecycle."""
+    changes = _manifest_list(manifest, "lifecycle_changes")
+    ref = _manifest_str(manifest, "change_log_reference")
+    supplied = bool(changes or ref)
+    return AnnexIVSection6(
+        changes=changes,
+        change_log_reference=ref,
+        note="" if supplied else PROVIDER_SUPPLIED_PLACEHOLDER,
+        provider_supplied=supplied,
+    )
+
+
+def _build_section7(manifest: SystemManifest) -> AnnexIVSection7:
+    """Annex IV pt.7 — harmonised standards applied, or alternative solutions."""
+    standards = _manifest_list(manifest, "harmonised_standards")
+    alternative = _manifest_str(manifest, "alternative_solutions")
+    supplied = bool(standards or alternative)
+    return AnnexIVSection7(
+        harmonised_standards=standards,
+        alternative_solutions=alternative,
+        note="" if supplied else PROVIDER_SUPPLIED_PLACEHOLDER,
+        provider_supplied=supplied,
+    )
+
+
+def _build_section8(manifest: SystemManifest) -> AnnexIVSection8:
+    """Annex IV pt.8 — reference to the EU declaration of conformity (Art. 47)."""
+    ref = _manifest_str(manifest, "eu_declaration_of_conformity_ref")
+    return AnnexIVSection8(
+        declaration_reference=ref,
+        note="" if ref else PROVIDER_SUPPLIED_PLACEHOLDER,
+        provider_supplied=bool(ref),
+    )
+
+
+def _build_section9(manifest: SystemManifest) -> AnnexIVSection9:
+    """Annex IV pt.9 — post-market monitoring plan (Art. 72)."""
+    ref = _manifest_str(manifest, "post_market_monitoring_plan_ref")
+    summary = _manifest_str(manifest, "post_market_monitoring_summary")
+    supplied = bool(ref or summary)
+    return AnnexIVSection9(
+        monitoring_plan_reference=ref,
+        plan_summary=summary,
+        note="" if supplied else PROVIDER_SUPPLIED_PLACEHOLDER,
+        provider_supplied=supplied,
+    )
 
 
 def _performance_metrics_with_evals(
@@ -106,6 +172,19 @@ def generate_dossier(
         _section2_training_complete and _section2_arch_complete
     )
 
+    # Annex IV points 6-9 are provider attestations. For a HIGH-risk system a
+    # placeholder in any of them means the file is not a complete Annex IV
+    # dossier, and must not be presented as one.
+    _sections_6_9 = (
+        _build_section6(manifest),
+        _build_section7(manifest),
+        _build_section8(manifest),
+        _build_section9(manifest),
+    )
+    annex_iv_complete = not _is_high_risk or all(
+        section.provider_supplied for section in _sections_6_9
+    )
+
     dossier = AnnexIVDossier(
         dossier_id=dossier_id,
         system_id=manifest.system_id,
@@ -158,6 +237,19 @@ def generate_dossier(
             ),
         ),
         section4=AnnexIVSection4(
+            metrics_reported=_performance_metrics_with_evals(
+                manifest.performance_metrics, eval_report
+            ),
+            appropriateness_rationale=_manifest_str(
+                manifest, "metrics_appropriateness_rationale"
+            )
+            or PROVIDER_SUPPLIED_PLACEHOLDER,
+            known_metric_limitations=list(manifest.known_limitations),
+            provider_supplied=bool(
+                _manifest_str(manifest, "metrics_appropriateness_rationale")
+            ),
+        ),
+        record_keeping=ArticleTwelveRecordKeeping(
             logging_enabled=True,
             log_retention_days=int(
                 os.environ.get("LOG_RETENTION_DAYS", "2555")
@@ -165,6 +257,11 @@ def generate_dossier(
             evidence_vault_enabled=True,
             ledger_root_hash=ledger_root_hash,
         ),
+        section6=_build_section6(manifest),
+        section7=_build_section7(manifest),
+        section8=_build_section8(manifest),
+        section9=_build_section9(manifest),
+        annex_iv_complete=annex_iv_complete,
         section5=AnnexIVSection5(
             risk_assessment_id=f"ra_{rationale_hash[7:15]}",
             risk_level=risk_result.risk_level.value,
@@ -262,9 +359,11 @@ def _sign_bundle_ed25519(bundle_json: str, key_path: str) -> str | None:
     wrong format, cryptography lib not installed).
     """
     try:
-        from opencomplai_core.signing import sign_bundle_bytes
+        from opencomplai_core.signing import SigningDomain, sign_bundle_bytes
 
-        return sign_bundle_bytes(bundle_json.encode("utf-8"), Path(key_path))
+        return sign_bundle_bytes(
+            bundle_json.encode("utf-8"), Path(key_path), SigningDomain.DOSSIER_BUNDLE
+        )
     except Exception:
         return None
 
@@ -275,6 +374,11 @@ def validate_dossier_schema(dossier: AnnexIVDossier) -> bool:
 
     Returns True if the schema is complete (REQ-DOC-001).
     This is the validator used in the CI release gate.
+
+    For a HIGH-risk system this requires all nine Annex IV points, including
+    the provider attestations in Sections 6-9. It previously inspected only
+    six Section 1 fields plus two hashes, so a dossier carrying 5 of 9 sections
+    passed the release gate as complete.
     """
     required_section1_fields = [
         "system_name",
@@ -293,5 +397,24 @@ def validate_dossier_schema(dossier: AnnexIVDossier) -> bool:
 
     if not dossier.bundle_checksum:
         return False
+
+    # Article 12 record-keeping must be present and enabled.
+    if dossier.record_keeping is None:
+        return False
+
+    if dossier.section1.risk_class == "high":
+        # Every Annex IV point must be attested, not merely instantiated.
+        for section in (
+            dossier.section6,
+            dossier.section7,
+            dossier.section8,
+            dossier.section9,
+        ):
+            if not section.provider_supplied:
+                return False
+        if not dossier.annex_iv_complete:
+            return False
+        if not dossier.section4.provider_supplied:
+            return False
 
     return True

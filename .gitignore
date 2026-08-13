@@ -68,3 +68,17 @@ x.key
 .tmp-*.db
 ci-logs/
 tmp/
+
+.vercel
+.env*.local
+
+# `vercel env pull <environment>` writes to a file named after the environment
+# when no `-o` path is given, so a mistyped pull drops a real token into the
+# repo root under a name none of the patterns above match. Ignore the three
+# environment names outright rather than relying on catching it in review.
+/development
+/preview
+/production
+
+# Scratch worktrees created by local agent tooling.
+.harness-worktrees/

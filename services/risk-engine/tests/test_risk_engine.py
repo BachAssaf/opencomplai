@@ -2,13 +2,16 @@
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from opencomplai_core.service_auth import mint_service_token
 from opencomplai_risk_engine.main import app
 
 
 @pytest.mark.asyncio
 async def test_health():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"},
     ) as client:
         r = await client.get("/health")
     assert r.status_code == 200
@@ -18,7 +21,9 @@ async def test_health():
 @pytest.mark.asyncio
 async def test_classify_minimal_risk():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"},
     ) as client:
         r = await client.post(
             "/v1/risk/classify",
@@ -37,7 +42,9 @@ async def test_classify_minimal_risk():
 @pytest.mark.asyncio
 async def test_classify_high_risk_employment():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"},
     ) as client:
         r = await client.post(
             "/v1/risk/classify",
@@ -53,7 +60,9 @@ async def test_classify_high_risk_employment():
 @pytest.mark.asyncio
 async def test_profiling_detection():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"},
     ) as client:
         r = await client.post(
             "/v1/risk/classify",
@@ -72,7 +81,9 @@ async def test_profiling_detection():
 @pytest.mark.asyncio
 async def test_modification_trap():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"},
     ) as client:
         r = await client.post(
             "/v1/risk/classify",
@@ -89,7 +100,9 @@ async def test_modification_trap():
 @pytest.mark.asyncio
 async def test_hitl_override_requires_rationale():
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {mint_service_token('test-caller', 'risk-engine-test-secret')}"},
     ) as client:
         r = await client.post(
             "/v1/hitl/overrides",
