@@ -57,12 +57,12 @@ manifest required, and it can never fail your build:
 
 === "macOS / Linux"
     ```bash
-    opencomplai scan --quick .
+    opencomplai scan --quick
     ```
 
 === "Windows (PowerShell)"
     ```powershell
-    opencomplai scan --quick .
+    opencomplai scan --quick
     ```
 
 ```text

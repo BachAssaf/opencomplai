@@ -4,15 +4,18 @@
 
 OpenComplAI brings EU AI Act compliance directly into your CI/CD pipeline, turning fragmented legal mandates into automated, machine-readable "Pre-Ship Checks."
 
-[![CI (Python)](assets/badge-ci-python.svg)](https://github.com/Opencomplai/opencomplai/actions/workflows/ci-python.yml) [![CI (Node)](assets/badge-ci-node.svg)](https://github.com/Opencomplai/opencomplai/actions/workflows/ci-node.yml) [![License: AGPL v3](assets/badge-license-agpl-v3.svg)](LICENSE) [![Python](assets/badge-python.svg)](https://www.python.org/) [![Node.js](assets/badge-nodejs.svg)](https://nodejs.org/)
+[![CI (Python)](assets/badge-ci-python.svg)](https://github.com/Opencomplai/opencomplai/actions/workflows/ci-python.yml) [![PyPI](https://img.shields.io/pypi/v/opencomplai)](https://pypi.org/project/opencomplai/) [![License: AGPL v3](assets/badge-license-agpl-v3.svg)](LICENSE) [![Python](assets/badge-python.svg)](https://www.python.org/) [![Node.js](assets/badge-nodejs.svg)](https://nodejs.org/)
 
 ### Demo
 
-<video src="https://raw.githubusercontent.com/Opencomplai/opencomplai-enterprise/main/assets/opencomplai.mp4" controls width="100%">
+![OpenComplAI quickstart — opencomplai scan --quick in action](assets/opencomplai-quickstart.gif)
+
+<video src="assets/opencomplai.mp4" controls width="100%">
   Your browser does not support the video tag.
 </video>
 
-[Watch the OpenComplAI demo (MP4)](https://raw.githubusercontent.com/Opencomplai/opencomplai-enterprise/main/assets/opencomplai.mp4)
+[Watch the full narrated walkthrough (MP4)](assets/opencomplai.mp4) — the GIF above is the
+30-second zero-setup scan; the MP4 is the deeper narrated tour.
 
 ## Why OpenComplAI?
 
@@ -34,7 +37,10 @@ Traditional GRC tools are disconnected dashboards that create "velocity tax." We
 
 - `opencomplai-core`: The rule engine that evaluates controls.
 - `opencomplai-cli`: Run checks locally in your dev environment.
-- `opencomplai-sdk`: Programmatically embed compliance into your custom internal tooling.
+- `opencomplai`: The Python SDK for embedding compliance into your own tooling — and the
+  package `pip install opencomplai` actually installs. It depends on `opencomplai-core` and
+  `opencomplai-cli`, so a single `pip install opencomplai` pulls in the whole stack (rule
+  engine, CLI, and SDK) in one go.
 
 ## Quick Start
 
@@ -64,11 +70,11 @@ opencomplai init --system-id my-model --intended-purpose "customer support chatb
 opencomplai check
 ```
 
-Or try it with zero setup first — `opencomplai scan --quick .` runs a discovery-only
-scan with no manifest required and never gates your build:
+Or try it with zero setup first — `opencomplai scan --quick` runs a discovery-only
+scan of the current directory with no manifest required and never gates your build:
 
 ```bash
-opencomplai scan --quick .
+opencomplai scan --quick
 ```
 
 ### Pre-commit hook
@@ -79,7 +85,7 @@ full compliance gate, once you have a manifest) on every commit:
 ```yaml
 repos:
   - repo: https://github.com/Opencomplai/opencomplai
-    rev: v0.1.2
+    rev: v0.3.0
     hooks:
       - id: opencomplai-quick-scan   # discovery only, never fails the commit
       # - id: opencomplai-check      # full EU AI Act gate — requires system-manifest.json
@@ -92,7 +98,8 @@ Full Docker-based deployment is documented in
 
 ## Community & Feedback
 
-We are currently in a **Closed Beta Pilot**. If you are an AI engineer or ML platform lead, we want your feedback.
+OpenComplAI is free to use today — `opencomplai scan --quick` and the EU AI Act Checker below
+both work with zero setup. We're actively building with early adopters and want your feedback.
 
 - **[Join our Developer Discord](https://discord.gg/egjX5JgQJ)** — discuss EU AI Act workflows, pipeline integration, and stress-test the engine with other MLOps engineers
 - [Report a bug](https://github.com/Opencomplai/opencomplai/issues/new?template=bug_report.md) · [Request a feature](https://github.com/Opencomplai/opencomplai/discussions/new?category=ideas)
@@ -164,6 +171,13 @@ Opencomplai is open-core:
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow conventions, and code
 style. Look for issues labelled `good first issue` to find starter-sized contributions. All
 contributors sign the [Contributor Licence Agreement](CLA.md).
+
+## Maintainers
+
+OpenComplAI is currently maintained by [@OpenComplaiCTO](https://github.com/OpenComplaiCTO).
+Pull requests are typically reviewed within a few business days — if you haven't heard back
+after a week, ping the PR directly or ask in
+[GitHub Discussions](https://github.com/Opencomplai/opencomplai/discussions).
 
 ## AI use
 

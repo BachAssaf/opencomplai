@@ -70,8 +70,10 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - `opencomplai`, `opencomplai-cli`, `opencomplai-core`, and `opencomplai-ai` are now
   published to PyPI. `pip install opencomplai` resolves the full stack; no source
-  checkout required. Packages are built and published in dependency order by
-  `.github/workflows/publish-pypi.yml` on `v*` tag push.
+  checkout required. Packages are built and published in dependency order from
+  the `opencomplai-enterprise` release workflow (PyPI's Trusted Publisher is
+  registered against that repo); this repository's own CI (`ci-python.yml`)
+  covers lint/test only.
 
 ### Contract
 

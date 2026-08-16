@@ -1,5 +1,5 @@
 {
-  "name": "opencomplai-enterprise-workspace",
+  "name": "opencomplai-workspace",
   "private": true,
   "pnpm": {
     "overrides": {
