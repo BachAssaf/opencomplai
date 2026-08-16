@@ -97,3 +97,12 @@ terms of the CLA.
 ## 12. Getting help
 
 Use GitHub Discussions for questions. Use GitHub Issues for bugs and feature requests.
+
+## 13. Maintainers
+
+OpenComplAI is currently maintained by [@OpenComplaiCTO](https://github.com/OpenComplaiCTO),
+who reviews and merges all pull requests. Expect a first response within a few business days;
+if a PR or issue has gone quiet for over a week, a bump comment or a note in
+[GitHub Discussions](https://github.com/Opencomplai/opencomplai/discussions) is welcome. We're
+actively looking to grow the reviewer pool — regular contributors interested in a maintainer
+role should say so in Discussions.

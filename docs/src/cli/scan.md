@@ -47,12 +47,12 @@ new user runs against a repo — before `init`, before a manifest exists at all:
 
 === "macOS / Linux"
     ```bash
-    opencomplai scan --quick .
+    opencomplai scan --quick
     ```
 
 === "Windows (PowerShell)"
     ```powershell
-    opencomplai scan --quick .
+    opencomplai scan --quick
     ```
 
 `--quick` forces `--fail-on none`, disables evidence emission (`--emit-evidence`),
