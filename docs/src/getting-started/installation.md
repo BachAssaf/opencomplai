@@ -40,7 +40,7 @@ Python 3.11+ is required. Verify with:
 | `opencomplai-cli` | [opencomplai-cli](https://pypi.org/project/opencomplai-cli/) | `pip install opencomplai-cli` | CLI only (pulls in core) |
 | `opencomplai-ai` | [opencomplai-ai](https://pypi.org/project/opencomplai-ai/) | `pip install opencomplai-ai` | Optional `--ai-intent` scan plugin |
 
-Latest release: **0.1.2** on PyPI.
+For current release versions, see the package pages on PyPI.
 
 ## Optional extras
 
