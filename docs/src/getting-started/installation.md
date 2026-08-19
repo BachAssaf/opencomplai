@@ -40,7 +40,8 @@ Python 3.11+ is required. Verify with:
 | `opencomplai-cli` | [opencomplai-cli](https://pypi.org/project/opencomplai-cli/) | `pip install opencomplai-cli` | CLI only (pulls in core) |
 | `opencomplai-ai` | [opencomplai-ai](https://pypi.org/project/opencomplai-ai/) | `pip install opencomplai-ai` | Optional `--ai-intent` scan plugin |
 
-For current release versions, see the package pages on PyPI.
+For the current version, see the [release history on
+PyPI](https://pypi.org/project/opencomplai/#history).
 
 ## Optional extras
 
@@ -105,20 +106,23 @@ the created `.venv`.
 
 ## Verify the installation
 
-The CLI does not expose a `--version` flag. Verify with `--help` (lists the
-available commands) and `pip show` (prints the installed version):
+Verify with `--help` (lists the available commands) and `--version` (prints
+the installed version):
 
 === "macOS / Linux"
     ```bash
     opencomplai --help
-    pip show opencomplai          # Version: 0.1.2
+    opencomplai --version
     ```
 
 === "Windows (PowerShell)"
     ```powershell
     opencomplai --help
-    pip show opencomplai          # Version: 0.1.2
+    opencomplai --version
     ```
+
+`opencomplai version` prints the same string, and `pip show opencomplai`
+still works if you want the full distribution metadata.
 
 A successful `opencomplai --help` lists `init`, `check`, `eval`,
 `validate-manifest`, `risk`, `docs`, `keys`, and more.
