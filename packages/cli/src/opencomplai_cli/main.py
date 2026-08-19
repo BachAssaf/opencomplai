@@ -73,6 +73,7 @@ from opencomplai_cli import (
     SUITE_PACKAGES,
     __version__,
 )
+from opencomplai_cli._encoding import install_ascii_fallback
 
 app = typer.Typer(
     name="opencomplai",
@@ -111,6 +112,11 @@ app.add_typer(sync_app, name="sync")
 app.add_typer(dashboard_app, name="dashboard")
 app.add_typer(keys_app, name="keys")
 app.add_typer(ai_app, name="ai")
+
+# Must run before the first byte is written: on a Windows console left on its
+# default OEM code page, the em dash in the --help banner is unencodable and
+# aborts the command mid-render. See opencomplai_cli._encoding.
+install_ascii_fallback(sys.stdout, sys.stderr)
 
 console = Console()
 err_console = Console(stderr=True)
