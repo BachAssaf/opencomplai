@@ -47,6 +47,7 @@ class SigningDomain(StrEnum):
     ARTIFACT = "scan-status-artifact"
     DOSSIER_BUNDLE = "annex-iv-dossier-bundle"
     BADGE = "compliance-badge"
+    APPROVAL_TOKEN = "hitl-approval-token"
 
 
 def domain_separated(domain: SigningDomain, payload: bytes) -> bytes:

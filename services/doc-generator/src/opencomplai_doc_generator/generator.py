@@ -46,6 +46,24 @@ def _manifest_list(manifest: SystemManifest, field: str) -> list[str]:
     return list(value) if isinstance(value, (list, tuple)) and value else []
 
 
+def _build_section3(manifest: SystemManifest) -> AnnexIVSection3:
+    """Annex IV pt.3 — human oversight, monitoring approach, incident response.
+
+    Counts as provider-supplied only when all three inputs are present: pt.3
+    asks for oversight measures, monitoring approach, and incident response
+    together, so a partially attested section must not pass the HIGH-risk gate.
+    """
+    oversight = _manifest_list(manifest, "human_oversight_measures")
+    monitoring = _manifest_str(manifest, "monitoring_approach")
+    incident = _manifest_str(manifest, "incident_response_procedure")
+    return AnnexIVSection3(
+        human_oversight_measures=oversight,
+        monitoring_approach=monitoring or PROVIDER_SUPPLIED_PLACEHOLDER,
+        incident_response_procedure=incident or PROVIDER_SUPPLIED_PLACEHOLDER,
+        provider_supplied=bool(oversight) and bool(monitoring) and bool(incident),
+    )
+
+
 def _build_section6(manifest: SystemManifest) -> AnnexIVSection6:
     """Annex IV pt.6 — relevant changes through the system's lifecycle."""
     changes = _manifest_list(manifest, "lifecycle_changes")
@@ -172,17 +190,19 @@ def generate_dossier(
         _section2_training_complete and _section2_arch_complete
     )
 
-    # Annex IV points 6-9 are provider attestations. For a HIGH-risk system a
-    # placeholder in any of them means the file is not a complete Annex IV
-    # dossier, and must not be presented as one.
+    # Annex IV point 3 and points 6-9 are provider attestations. For a
+    # HIGH-risk system a placeholder in any of them means the file is not a
+    # complete Annex IV dossier, and must not be presented as one.
+    section3 = _build_section3(manifest)
     _sections_6_9 = (
         _build_section6(manifest),
         _build_section7(manifest),
         _build_section8(manifest),
         _build_section9(manifest),
     )
-    annex_iv_complete = not _is_high_risk or all(
-        section.provider_supplied for section in _sections_6_9
+    annex_iv_complete = not _is_high_risk or (
+        section3.provider_supplied
+        and all(section.provider_supplied for section in _sections_6_9)
     )
 
     dossier = AnnexIVDossier(
@@ -222,20 +242,7 @@ def generate_dossier(
             ),
             known_limitations=list(manifest.known_limitations),
         ),
-        section3=AnnexIVSection3(
-            human_oversight_measures=(
-                list(manifest.human_oversight_measures)
-                if manifest.human_oversight_measures
-                else ["HITL orchestrator enabled"]
-            ),
-            monitoring_approach=(
-                manifest.monitoring_approach
-                or "Evidence Vault + continuous CI compliance checks"
-            ),
-            incident_response_procedure=(
-                manifest.incident_response_procedure or "See docs/incident-response.md"
-            ),
-        ),
+        section3=section3,
         section4=AnnexIVSection4(
             metrics_reported=_performance_metrics_with_evals(
                 manifest.performance_metrics, eval_report
@@ -415,6 +422,8 @@ def validate_dossier_schema(dossier: AnnexIVDossier) -> bool:
         if not dossier.annex_iv_complete:
             return False
         if not dossier.section4.provider_supplied:
+            return False
+        if not dossier.section3.provider_supplied:
             return False
 
     return True

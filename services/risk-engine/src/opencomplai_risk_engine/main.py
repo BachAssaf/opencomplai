@@ -717,6 +717,23 @@ async def decide_hitl_queue_item(review_id: str, request: DecideReviewRequest) -
     return {"item": updated.model_dump(), "override": override.model_dump()}
 
 
+class ReassessRequest(BaseModel):
+    system_id: str
+    commit_ref: str = "HEAD"
+    current_fingerprint: str
+
+
+@router.post("/v1/controls/reassess")
+async def reassess_controls_endpoint(request: ReassessRequest) -> dict:
+    """Detect TTL-expiry / manifest-change staleness for a system's controls
+    and enqueue exactly one `ReviewItem` per newly-stale control (CTRL-FRESH)."""
+    from opencomplai_risk_engine.control_reassessment import reassess_controls
+
+    return reassess_controls(
+        request.system_id, request.commit_ref, request.current_fingerprint
+    )
+
+
 class VerifyClaimRequest(BaseModel):
     claim_ref: str = ""
     source_ref: str = "offline://default"

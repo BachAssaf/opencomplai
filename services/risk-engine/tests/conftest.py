@@ -9,6 +9,8 @@ can attach it.
 
 from __future__ import annotations
 
+import urllib.error as urlerr
+
 import pytest
 from opencomplai_core.service_auth import mint_service_token
 
@@ -42,12 +44,19 @@ class _FakeVault:
         self.review_contexts: dict[str, dict] = {}
         self.accepted_overrides: dict[str, dict] = {}
         self.completed_evals: dict[str, dict] = {}
+        # CTRL-FRESH (CTRL-STORE): controls bucketed by system_id, keyed by
+        # control_id (mirrors the real PUT /v1/controls presence-based
+        # upsert), and fingerprints keyed by system_id.
+        self.controls: dict[str, dict[str, dict]] = {}
+        self.fingerprints: dict[str, str] = {}
 
     def clear(self):
         self.review_items.clear()
         self.review_contexts.clear()
         self.accepted_overrides.clear()
         self.completed_evals.clear()
+        self.controls.clear()
+        self.fingerprints.clear()
 
     def __call__(self, method: str, path: str, body: dict | None = None) -> dict | None:
         if path == "/v1/hitl/review-items" and method == "PUT":
@@ -101,6 +110,39 @@ class _FakeVault:
         if path == "/v1/evals/cache" and method == "POST":
             self.completed_evals.setdefault(body["eval_run_id"], body["result_json"])
             return {"eval_run_id": body["eval_run_id"]}
+        if method == "GET" and path.startswith("/v1/controls/"):
+            system_id = path.rsplit("/", 1)[-1]
+            return {"items": list(self.controls.get(system_id, {}).values())}
+        if method == "PUT" and path == "/v1/controls":
+            assert body is not None
+            items = []
+            for item in body["items"]:
+                # Presence-based patch: merge onto any existing row, keyed by
+                # control_id, mirroring evidence-vault's upsert_controls.
+                system_bucket = None
+                for bucket in self.controls.values():
+                    if item["control_id"] in bucket:
+                        system_bucket = bucket
+                        break
+                if system_bucket is not None:
+                    system_bucket[item["control_id"]].update(item)
+                    items.append(system_bucket[item["control_id"]])
+                else:
+                    bucket = self.controls.setdefault(item["system_id"], {})
+                    bucket[item["control_id"]] = item
+                    items.append(item)
+            return {"items": items}
+        if method == "GET" and path.startswith("/v1/fingerprints/"):
+            system_id = path.rsplit("/", 1)[-1]
+            fingerprint = self.fingerprints.get(system_id)
+            if fingerprint is None:
+                raise urlerr.HTTPError(path, 404, "Fingerprint not found", None, None)
+            return {"fingerprint": fingerprint}
+        if method == "PUT" and path.startswith("/v1/fingerprints/"):
+            assert body is not None
+            system_id = path.rsplit("/", 1)[-1]
+            self.fingerprints[system_id] = body["fingerprint"]
+            return {"fingerprint": body["fingerprint"]}
         raise AssertionError(f"unhandled fake-vault request: {method} {path}")
 
 
@@ -145,12 +187,16 @@ def _wrap_get_review_item_and_context(fake: _FakeVault, monkeypatch):
 def fake_vault(monkeypatch):
     """
     Autouse-able fixture that routes all evidence-vault HITL/override/eval-
-    cache calls made by main.py and review_queue.py to a shared in-memory
-    store for the duration of a test. Yields the _FakeVault instance so
-    tests can inspect or clear it directly.
+    cache/control-registry calls made by main.py, review_queue.py, and
+    control_reassessment.py to a shared in-memory store for the duration of
+    a test. Yields the _FakeVault instance so tests can inspect or clear it
+    directly.
     """
     fake = _FakeVault()
     monkeypatch.setattr("opencomplai_risk_engine.main._vault_request", fake)
     monkeypatch.setattr("opencomplai_risk_engine.review_queue._vault_request", fake)
+    monkeypatch.setattr(
+        "opencomplai_risk_engine.control_reassessment._vault_request", fake
+    )
     _wrap_get_review_item_and_context(fake, monkeypatch)
     return fake

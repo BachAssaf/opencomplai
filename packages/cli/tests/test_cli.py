@@ -36,6 +36,33 @@ def test_init_creates_manifest(tmp_path):
     assert data["intended_purpose"] == "customer support chatbot"
 
 
+def test_init_section_extras_file_sets_annex_iv_attestation_fields(tmp_path):
+    """--section-extras-file must land unknown-to-flags fields (e.g. harmonised_standards)
+    on the written manifest, since Section 7 provider attestations have no dedicated flag."""
+    extras_file = tmp_path / "extras.json"
+    extras_file.write_text(
+        json.dumps({"harmonised_standards": ["EN ISO/IEC 42001:2023"]})
+    )
+    manifest_file = tmp_path / "system-manifest.json"
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--system-id",
+            "test-system",
+            "--intended-purpose",
+            "customer support chatbot",
+            "--section-extras-file",
+            str(extras_file),
+            "--output",
+            str(manifest_file),
+        ],
+    )
+    assert result.exit_code == 0, f"init failed: {result.output}"
+    data = json.loads(manifest_file.read_text())
+    assert data["harmonised_standards"] == ["EN ISO/IEC 42001:2023"]
+
+
 def test_validate_manifest_valid(tmp_path):
     manifest_file = _write_manifest(tmp_path, "test", "customer support chatbot")
     result = runner.invoke(app, ["validate-manifest", str(manifest_file)])

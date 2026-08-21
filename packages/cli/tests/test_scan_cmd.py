@@ -109,7 +109,8 @@ def test_init_scan_prints_without_mutating_manifest(tmp_path):
     assert data["intended_purpose"] == "customer support chatbot"
 
 
-def test_check_scan_without_fail_on_preserves_pass_exit(tmp_path):
+def test_check_scan_without_fail_on_preserves_pass_exit(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     manifest = _write_manifest(tmp_path)
     repo = _biometric_repo(tmp_path)
     result = runner.invoke(

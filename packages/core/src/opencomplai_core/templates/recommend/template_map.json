@@ -65,6 +65,12 @@
     "title": "Risk Register Entry Stub",
     "file": "risk_register_entry.md"
   },
+  "Art. 17": {
+    "template_id": "qms_outline",
+    "kind": "markdown",
+    "title": "Quality Management System Outline",
+    "file": "qms_outline.md"
+  },
   "Art. 24": {
     "template_id": "annex_iii_applicability_note",
     "kind": "markdown",

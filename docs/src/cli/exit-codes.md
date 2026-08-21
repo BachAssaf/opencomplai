@@ -26,3 +26,20 @@ Opencomplai uses fixed, contractual exit codes so CI pipelines can reliably gate
 | `2` | Run `opencomplai init` first, or check that `system-manifest.json` is valid. |
 | `3` | Review the policy configuration. Ensure egress destinations are allowed. |
 | `4` | Contact your compliance team — a trap may indicate a supply-chain issue. |
+
+## Control register (`opencomplai controls`)
+
+`opencomplai controls status` mirrors the same exit-code convention for the persistent control register (requires `OPENCOMPLAI_VAULT_URL`):
+
+| Exit code | When it happens |
+|---:|---|
+| `0` | Every control is satisfied or waived, and none are stale by TTL. |
+| `1` | A control is `evidence_missing` (unless `--no-fail-on-missing`), `evidence_stale`, `pending_review`, or stale by TTL. |
+| `2` | `OPENCOMPLAI_VAULT_URL` is not set, or an input (control id, file path) was invalid. |
+| `3` | The evidence-vault request failed (network/service error). |
+
+`controls list` and `controls assign`/`attach-evidence` always exit `0` on success — only `status` gates CI.
+
+## Halt / resume gate (`opencomplai check`, `opencomplai docs generate`)
+
+When `check` detects a trap (`TRAP_DETECTED`), or an unresolved HIGH-risk corroboration gap (HIGH risk class plus a failed `--scan --fail-on ...` gate), the system is persisted as `HALTED_PENDING_REVIEW`. While halted, `opencomplai docs generate` for that `system_id` refuses with exit `4` and no dossier is written — there is no `--force` bypass. Resume with `opencomplai approve --system-id ... --approver ...` to mint a signed approval token, then `opencomplai resume --system-id ... --approval-token ...`; an invalid or mismatched token exits `2` and leaves the system halted.

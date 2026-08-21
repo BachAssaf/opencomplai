@@ -77,3 +77,77 @@ def test_scan_status_artifact_model():
     )
     assert artifact.result == ScanResult.PASS
     assert artifact.signature is None  # unsigned in OSS mode
+
+
+def test_scan_status_artifact_controls_absent_from_dict_parses_as_none():
+    """CTRL-ARTIFACT back-compat: an artifact dict predating the `controls`
+    block (no `controls` key at all) must still validate, with `controls`
+    defaulting to None — same contract as the `gap_report` donor field."""
+    from opencomplai_core.models import ScanResult, ScanStatusArtifact
+
+    raw = {
+        "install_id": "uuid-1",
+        "system_id": "test-sys",
+        "commit_ref": "abc123",
+        "result": ScanResult.PASS.value,
+        "failed_controls": [],
+        "evidence_hashes": ["sha256:abc"],
+        "rationale_hash": "sha256:def",
+        "duration_ms": 1200,
+        "pending_verifications_count": 0,
+    }
+    assert "controls" not in raw
+    artifact = ScanStatusArtifact.model_validate(raw)
+    assert artifact.controls is None
+
+
+def test_scan_status_artifact_controls_block_round_trips():
+    """An artifact carrying a `controls` block survives model_validate(model_dump())."""
+    from opencomplai_core.models import (
+        ControlsSummary,
+        ControlState,
+        ControlSummaryRow,
+        ScanResult,
+        ScanStatusArtifact,
+    )
+
+    controls = ControlsSummary(
+        summary={
+            "satisfied": 1,
+            "evidence_missing": 1,
+            "evidence_stale": 0,
+            "pending_review": 0,
+            "waived": 0,
+        },
+        items=[
+            ControlSummaryRow(
+                control_id="c1",
+                article_ref="Art. 9",
+                state=ControlState.SATISFIED,
+                owner="alice",
+                due_at="2026-09-01T00:00:00+00:00",
+            ),
+            ControlSummaryRow(
+                control_id="c2",
+                article_ref="Art. 10",
+                state=ControlState.EVIDENCE_MISSING,
+                owner=None,
+                due_at=None,
+            ),
+        ],
+    )
+    artifact = ScanStatusArtifact(
+        install_id="uuid-1",
+        system_id="test-sys",
+        commit_ref="abc123",
+        result=ScanResult.PASS,
+        failed_controls=[],
+        evidence_hashes=["sha256:abc"],
+        rationale_hash="sha256:def",
+        duration_ms=1200,
+        pending_verifications_count=0,
+        controls=controls,
+    )
+
+    round_tripped = ScanStatusArtifact.model_validate(artifact.model_dump())
+    assert round_tripped == artifact

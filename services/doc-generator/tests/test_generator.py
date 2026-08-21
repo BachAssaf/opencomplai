@@ -2,6 +2,7 @@
 
 import os
 
+from opencomplai_core.dossier import PROVIDER_SUPPLIED_PLACEHOLDER
 from opencomplai_core.engine import assess
 from opencomplai_core.models import AssessmentInput, ModelMetadata, SystemManifest
 from opencomplai_doc_generator.generator import (
@@ -122,6 +123,7 @@ def test_high_risk_dossier_passes_once_sections_6_to_9_are_attested():
     manifest = _make_manifest(purpose="employment screening")
     dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
 
+    dossier.section3.provider_supplied = True
     dossier.section4.provider_supplied = True
     for section in (
         dossier.section6,
@@ -204,14 +206,17 @@ def test_section3_overrides_from_manifest():
         dossier.section3.incident_response_procedure
         == "Runbook at runbooks/ai-incident.md"
     )
+    assert dossier.section3.provider_supplied is True
 
 
 def test_section3_stubbed_when_manifest_silent():
-    """Falls back to the stub when nothing is provided — MINIMAL-risk default."""
+    """Falls back to the placeholder when nothing is provided — never a
+    fabricated attestation."""
     dossier = generate_dossier(_make_manifest(), _make_risk_result())
-    assert dossier.section3.human_oversight_measures == ["HITL orchestrator enabled"]
-    assert "Evidence Vault" in dossier.section3.monitoring_approach
-    assert "incident-response" in dossier.section3.incident_response_procedure
+    assert dossier.section3.human_oversight_measures == []
+    assert dossier.section3.monitoring_approach == PROVIDER_SUPPLIED_PLACEHOLDER
+    assert dossier.section3.incident_response_procedure == PROVIDER_SUPPLIED_PLACEHOLDER
+    assert dossier.section3.provider_supplied is False
 
 
 def test_ledger_root_hash_embedded_when_supplied():
@@ -414,3 +419,130 @@ def test_section2_complete_excluded_from_bundle_checksum():
     )
     assert bundle_json_original == bundle_json_patched
     assert dossier.bundle_checksum == patched.bundle_checksum
+
+
+# ---------------------------------------------------------------------------
+# ANNEX-FIELDS — SystemManifest Annex IV attestation fields (Sections 3, 4, 6-9)
+# ---------------------------------------------------------------------------
+
+
+def _make_high_risk_manifest_with_annex_iv_attestations() -> SystemManifest:
+    return SystemManifest(
+        system_id="test",
+        intended_purpose="employment screening",
+        compliance_target="EU_AI_ACT",
+        high_risk_presumption=True,
+        commit_ref="abc123",
+        training_data_description="real training data description here",
+        model_architecture="real model architecture description here",
+        human_oversight_measures=["Two-person review on every override"],
+        monitoring_approach="Datadog + custom drift checks every 6h",
+        incident_response_procedure="Runbook at runbooks/ai-incident.md",
+        metrics_appropriateness_rationale=(
+            "Precision/recall are appropriate for a binary screening decision."
+        ),
+        lifecycle_changes=["v1.1: recalibrated decision threshold"],
+        change_log_reference="CHANGELOG.md#v1.1",
+        harmonised_standards=["EN ISO/IEC 42001:2023"],
+        alternative_solutions=None,
+        eu_declaration_of_conformity_ref="DoC-2026-001",
+        post_market_monitoring_plan_ref="docs/pmm-plan.md",
+        post_market_monitoring_summary="Quarterly drift review with sign-off.",
+    )
+
+
+def test_annex_iv_attestations_supplied_marks_sections_complete_for_high_risk():
+    """With all Section 3/4/6-9 fields set, every attested section — and the
+    dossier as a whole — must report complete for a HIGH-risk system."""
+    manifest = _make_high_risk_manifest_with_annex_iv_attestations()
+    dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
+
+    assert dossier.section1.risk_class == "high"
+    assert dossier.section3.provider_supplied is True
+    assert dossier.section4.provider_supplied is True
+    for section in (
+        dossier.section6,
+        dossier.section7,
+        dossier.section8,
+        dossier.section9,
+    ):
+        assert section.provider_supplied is True
+    assert dossier.annex_iv_complete is True
+    assert validate_dossier_schema(dossier) is True
+
+
+def test_annex_iv_attestations_absent_keeps_high_risk_dossier_incomplete():
+    """Regression on the c92ea74 gate: without the attestation fields, a
+    HIGH-risk dossier must still be flagged incomplete, not silently pass."""
+    manifest = _make_manifest(purpose="employment screening")
+    dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
+
+    assert dossier.section1.risk_class == "high"
+    assert dossier.section3.provider_supplied is False
+    assert dossier.section4.provider_supplied is False
+    for section in (
+        dossier.section6,
+        dossier.section7,
+        dossier.section8,
+        dossier.section9,
+    ):
+        assert section.provider_supplied is False
+    assert dossier.annex_iv_complete is False
+    assert validate_dossier_schema(dossier) is False
+
+
+def test_annex_iv_high_risk_gate_rejects_section3_unset_even_with_4_and_6_9_attested():
+    """Sections 4 and 6-9 fully attested but Section 3 untouched must still
+    fail the HIGH-risk gate — Section 3 is now part of annex_iv_complete."""
+    manifest = _make_high_risk_manifest_with_annex_iv_attestations()
+    manifest = manifest.model_copy(
+        update={
+            "human_oversight_measures": [],
+            "monitoring_approach": None,
+            "incident_response_procedure": None,
+        }
+    )
+    dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
+
+    assert dossier.section1.risk_class == "high"
+    assert dossier.section3.provider_supplied is False
+    assert dossier.section4.provider_supplied is True
+    for section in (
+        dossier.section6,
+        dossier.section7,
+        dossier.section8,
+        dossier.section9,
+    ):
+        assert section.provider_supplied is True
+    assert dossier.annex_iv_complete is False
+    assert validate_dossier_schema(dossier) is False
+
+
+def test_annex_iv_high_risk_gate_rejects_section3_partially_set():
+    """Only monitoring_approach supplied — oversight measures and incident
+    response still missing — must not count as provider-supplied."""
+    manifest = _make_high_risk_manifest_with_annex_iv_attestations()
+    manifest = manifest.model_copy(
+        update={
+            "human_oversight_measures": [],
+            "incident_response_procedure": None,
+        }
+    )
+    dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
+
+    assert (
+        dossier.section3.monitoring_approach == "Datadog + custom drift checks every 6h"
+    )
+    assert dossier.section3.provider_supplied is False
+    assert dossier.annex_iv_complete is False
+    assert validate_dossier_schema(dossier) is False
+
+
+def test_annex_iv_attestations_absent_does_not_affect_minimal_risk():
+    """MINIMAL-risk dossiers were never gated on Sections 4/6-9 — behaviour
+    must be unchanged now that the manifest can carry those fields."""
+    dossier = generate_dossier(_make_manifest(purpose="chatbot"), _make_risk_result())
+
+    assert dossier.section1.risk_class != "high"
+    assert dossier.annex_iv_complete is True
+    assert validate_dossier_schema(dossier) is True

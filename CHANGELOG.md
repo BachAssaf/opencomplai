@@ -11,6 +11,60 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.0] — 2026-08-20
+
+### Added
+
+- Persistent control-instance register: `ControlInstance` model, control
+  catalog, and deterministic identity (`control_id = sha256(tenant_id |
+  system_id | obligation_id)`, idempotent across runs). Instances derive from
+  a `gaps` run and persist to the evidence vault (migration `0007`,
+  tenant-scoped RLS). New `opencomplai controls` command group (`list`,
+  `assign`, `attach-evidence`, `status`) gives a CI-consumable summary of
+  what's satisfied, missing, stale, or waived.
+- Evidence provenance and freshness metadata on evidence objects; read-time
+  freshness detection and change-triggered reassessment
+  (`opencomplai_risk_engine.control_reassessment`) — no new scheduler, no
+  cron service.
+- Annex IV provider-attestation fields on `SystemManifest`. `docs generate`
+  now loads the most recent scan/eval artifacts from disk and wires them into
+  dossier generation instead of leaving those sections dead, and stops
+  fabricating Section 3 content the provider never supplied — absence stays
+  an explicit placeholder, never a guess.
+- First-class Art. 17 (QMS) gap probe and a content-aware Art. 9 (risk
+  register) probe.
+- HITL halt/resume state machine wired into `check` and `docs generate`: new
+  top-level `approve`/`resume` commands and exit code `4`
+  (`HALTED_PENDING_REVIEW`).
+- `compliance-artifact.json` gains an optional top-level `controls` block
+  (summary counts + per-control rows) — additive, existing consumers are
+  unaffected.
+- Annex IV coverage ledger and controls-lifecycle docs
+  (`docs/src/concepts/annex-iv-coverage.md`, `docs/src/concepts/controls.md`).
+- `CONTRIBUTORS.md`, and a `Maintainers` section in `README.md` and
+  `CONTRIBUTING.md`.
+
+### Fixed
+
+- The CLI no longer aborts with `UnicodeEncodeError` on a Windows console
+  left on a legacy code page (cp437/cp1252, the default OEM code page);
+  output degrades to ASCII instead of crashing mid-render (community
+  contribution, `packages/cli/src/opencomplai_cli/_encoding.py`).
+- Installation and quick-start docs no longer hardcode a stale PyPI version
+  or claim the CLI has no `--version` flag; `opencomplai scan --quick`
+  examples no longer show a trailing positional path argument the CLI
+  doesn't accept (community contributions).
+
+### Changed
+
+- README: corrected the SDK package name (`opencomplai`, not
+  `opencomplai-sdk`), softened the "Closed Beta Pilot" framing now that the
+  quick-scan and EU AI Act Checker paths are free with zero setup, and
+  swapped the broken CI (Node) badge — it linked to a workflow this repo
+  doesn't run — for a PyPI version badge.
+
+---
+
 ## [0.3.0] — 2026-08-13
 
 ### Added

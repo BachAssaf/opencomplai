@@ -61,6 +61,11 @@
       { "kind": "artifact", "ref": "provider_qms_bundle" }
     ]
   },
+  "Art. 17": {
+    "sources": [
+      { "kind": "artifact", "ref": "provider_qms" }
+    ]
+  },
   "Art. 24": {
     "sources": [
       { "kind": "artifact", "ref": "distributor_conformity" }

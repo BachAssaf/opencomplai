@@ -10,12 +10,20 @@ from opencomplai_core.models import GapStatus, SignalCategory
 from opencomplai_core.scanner.registry import DETECTOR_REGISTRY
 
 
-def test_gap_map_covers_seventeen_articles():
+def test_gap_map_covers_eighteen_articles():
     load_gap_article_map.cache_clear()
     articles = set(load_gap_article_map())
-    for art in ("Art. 9", "Art. 13", "Art. 14", "Art. 16", "Art. 24", "Art. 43"):
+    for art in (
+        "Art. 9",
+        "Art. 13",
+        "Art. 14",
+        "Art. 16",
+        "Art. 17",
+        "Art. 24",
+        "Art. 43",
+    ):
         assert art in articles
-    assert len(articles) >= 17
+    assert len(articles) >= 18
 
 
 def test_artifact_probe_finds_risk_register(tmp_path: Path):

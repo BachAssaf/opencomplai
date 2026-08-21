@@ -80,6 +80,26 @@ Annex IV Dossier Generated
 }
 ```
 
+## Sidecar reports (D10)
+
+`--scan-report` and `--eval-report` default to `scan-report.json` and
+`eval-report.json` in the current directory — the same files `opencomplai
+check`/`opencomplai gaps` write automatically when a scan or eval actually
+ran. If either file exists, `generate` loads it and populates the
+corresponding wired-evidence fields on the dossier (Section 5 scanner
+fields, eval-merged metrics). If neither exists, those fields stay exactly
+as empty as they are without them — nothing is fabricated to fill the gap.
+See the [Annex IV coverage ledger](../concepts/annex-iv-coverage.md) for
+which dossier fields are automated, wired evidence, or provider attestation.
+
+## Halt / resume
+
+If the system is currently `HALTED_PENDING_REVIEW` (see
+[check](check.md#halt-on-trap--unresolved-high-risk-gap)), `generate` refuses
+outright and exits `4` — no dossier is written, and there is no `--force`
+bypass. Resume with `opencomplai approve` then `opencomplai resume` before
+retrying.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -88,3 +108,4 @@ Annex IV Dossier Generated
 | 1 | Dossier generation failed (local mode error). |
 | 2 | Validation error (invalid options or missing `opencomplai-doc-generator`). |
 | 3 | Service unreachable or policy blocked (service-backed mode only). |
+| 4 | The system is `HALTED_PENDING_REVIEW` — dossier generation refused until resumed. |

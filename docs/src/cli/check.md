@@ -130,6 +130,22 @@ With `--sample-set`, the `Evals: ...skipped` line is replaced by an
 `eval_summary` is populated only when `--sample-set` is supplied; `signature` is
 populated only when `--sign` is supplied (and a signing key exists).
 
+`check` also writes `scan-report.json` / `eval-report.json` sidecars next to
+`compliance-artifact.json` whenever a scan (`--scan`) or eval (`--sample-set`)
+actually ran — these are what `opencomplai docs generate` picks up
+automatically to populate the Annex IV dossier's wired-evidence fields. See
+[Annex IV coverage ledger](../concepts/annex-iv-coverage.md).
+
+## Halt on trap / unresolved HIGH-risk gap
+
+A `TRAP_DETECTED` result, or a HIGH-risk system with an unresolved
+corroboration gap (HIGH risk class plus a failed `--scan --fail-on ...`
+gate), persists the system as `HALTED_PENDING_REVIEW`. While halted,
+`opencomplai docs generate` for that `system_id` refuses outright (exit `4`,
+no dossier written, no `--force`). Resume with `opencomplai approve` /
+`opencomplai resume` — see
+[Halt / resume gate](exit-codes.md#halt--resume-gate-opencomplai-check-opencomplai-docs-generate).
+
 ## Exit codes
 
 See [Exit codes](exit-codes.md) for the full table.

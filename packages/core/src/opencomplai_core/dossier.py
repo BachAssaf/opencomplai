@@ -31,14 +31,6 @@ class AnnexIVSection2(BaseModel):
     known_limitations: list[str] = Field(default_factory=list)
 
 
-class AnnexIVSection3(BaseModel):
-    """Detailed information about monitoring, functioning and control (Annex IV, Section 3)."""
-
-    human_oversight_measures: list[str] = Field(default_factory=list)
-    monitoring_approach: str
-    incident_response_procedure: str
-
-
 #: Marker used by every section this engine cannot derive from the repository.
 #: These are provider attestations, not artefacts a scanner can infer, so they
 #: are emitted as explicit, labelled placeholders rather than silently omitted.
@@ -46,6 +38,15 @@ PROVIDER_SUPPLIED_PLACEHOLDER = (
     "Not supplied. This section requires a provider attestation and cannot be "
     "derived automatically from the repository."
 )
+
+
+class AnnexIVSection3(BaseModel):
+    """Detailed information about monitoring, functioning and control (Annex IV, Section 3)."""
+
+    human_oversight_measures: list[str] = Field(default_factory=list)
+    monitoring_approach: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    incident_response_procedure: str = PROVIDER_SUPPLIED_PLACEHOLDER
+    provider_supplied: bool = False
 
 
 class AnnexIVSection4(BaseModel):

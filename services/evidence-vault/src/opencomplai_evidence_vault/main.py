@@ -12,7 +12,9 @@ import base64
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 from xml.sax.saxutils import escape as _xml_escape
 
 from alembic import command
@@ -37,6 +39,12 @@ from opencomplai_evidence_vault.bias_alerts import (
     store_bias_alert,
 )
 from opencomplai_evidence_vault.cas import CONTENT_HASH_RE, CASStore, get_cas_backend
+from opencomplai_evidence_vault.controls import (
+    get_fingerprint,
+    list_controls,
+    put_fingerprint,
+    upsert_controls,
+)
 from opencomplai_evidence_vault.hitl import (
     get_accepted_override,
     get_completed_eval,
@@ -84,7 +92,11 @@ from opencomplai_evidence_vault.ledger import (
     get_chain_tip,
     verify_chain,
 )
-from opencomplai_evidence_vault.models import OSS_DEFAULT_TENANT_ID, DossierIndexDB
+from opencomplai_evidence_vault.models import (
+    OSS_DEFAULT_TENANT_ID,
+    DossierIndexDB,
+    EvidenceObjectDB,
+)
 from opencomplai_evidence_vault.models import Base as _LedgerBase
 from opencomplai_evidence_vault.service_auth_dependency import require_service_principal
 
@@ -236,6 +248,10 @@ class ProIngestMetricsRequest(BaseModel):
 
 class StoreObjectRequest(BaseModel):
     content_base64: str
+    source: str | None = None
+    source_version: str | None = None
+    collected_at: str | None = None
+    valid_until: str | None = None
 
 
 class StoreBiasAlertRequest(BaseModel):
@@ -302,9 +318,48 @@ class CompletedEvalStoreRequest(BaseModel):
     result_json: dict
 
 
+class ControlItemRequest(BaseModel):
+    """
+    One `ControlInstance`-shaped item in a `PUT /v1/controls` bulk upsert.
+
+    Every field is optional at the request-model level because this same
+    shape carries both full creates and partial patches (owner-only,
+    state-only, ...); `exclude_unset=True` at the call site is what turns
+    "field omitted from the JSON body" into "field absent from the dict",
+    which is the presence signal `controls.upsert_controls` patches on. A
+    create that omits a field required by the core `ControlInstance` model
+    (system_id/obligation_id/article_ref/state) fails at the DAO layer.
+    """
+
+    control_id: str | None = None
+    system_id: str | None = None
+    obligation_id: str | None = None
+    article_ref: str | None = None
+    owner: str | None = None
+    state: str | None = None
+    evidence_refs: list[str] | None = None
+    ttl_days: int | None = None
+    last_assessed_at: str | None = None
+    last_evidence_at: str | None = None
+    due_at: str | None = None
+    waiver_rationale: str | None = None
+
+
+class ControlsUpsertRequest(BaseModel):
+    items: list[ControlItemRequest]
+
+
+class FingerprintPutRequest(BaseModel):
+    fingerprint: str
+
+
 class StoreObjectResponse(BaseModel):
     content_hash: str
     storage_uri: str
+    source: str | None = None
+    source_version: str | None = None
+    collected_at: str | None = None
+    valid_until: str | None = None
 
 
 class StoreDossierIndexRequest(BaseModel):
@@ -348,12 +403,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # dossier_index is also covered by migration 0002 for prod; create_all is idempotent.
     async with engine.begin() as conn:
         from opencomplai_evidence_vault.bias_alerts import _Base as _BiasBase
+        from opencomplai_evidence_vault.controls import _Base as _ControlsBase
         from opencomplai_evidence_vault.hitl import _Base as _HitlBase
 
         await conn.run_sync(_BiasBase.metadata.create_all)
         await conn.run_sync(_BadgeBase.metadata.create_all)
         await conn.run_sync(_LedgerBase.metadata.create_all)
         await conn.run_sync(_HitlBase.metadata.create_all)
+        await conn.run_sync(_ControlsBase.metadata.create_all)
 
     app.state.engine = engine
     app.state.sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
@@ -462,7 +519,10 @@ def create_app() -> FastAPI:
         "/v1/evidence/objects", response_model=StoreObjectResponse, status_code=201
     )
     async def store_evidence_object(
-        request_body: StoreObjectRequest, request: Request
+        request_body: StoreObjectRequest,
+        request: Request,
+        session: AsyncSession = Depends(get_tenant_session),
+        principal: str = Depends(require_service_principal),
     ) -> StoreObjectResponse:
         try:
             content = base64.b64decode(request_body.content_base64, validate=True)
@@ -473,9 +533,73 @@ def create_app() -> FastAPI:
 
         cas: CASStore = request.app.state.cas
         content_hash = cas.write(content)
+        storage_uri = str(cas._path_for(content_hash))
+
+        source = request_body.source or principal
+        collected_at = request_body.collected_at or datetime.now(UTC).isoformat()
+        source_version = request_body.source_version
+        valid_until = request_body.valid_until
+
+        existing_stmt = select(EvidenceObjectDB).where(
+            EvidenceObjectDB.content_hash == content_hash
+        )
+        existing = (await session.execute(existing_stmt)).scalar_one_or_none()
+        if existing is None:
+            row = EvidenceObjectDB(
+                evidence_id=str(uuid4()),
+                content_hash=content_hash,
+                storage_uri=storage_uri,
+                source=source,
+                source_version=source_version,
+                collected_at=collected_at,
+                valid_until=valid_until,
+            )
+            try:
+                async with session.begin_nested():
+                    session.add(row)
+                    await session.flush()
+            except IntegrityError:
+                # Concurrent request for the same content_hash won the race
+                # between our existence check above and this insert.
+                existing = (await session.execute(existing_stmt)).scalar_one_or_none()
+                if existing is None:
+                    raise
+            else:
+                await session.commit()
+                return StoreObjectResponse(
+                    content_hash=content_hash,
+                    storage_uri=storage_uri,
+                    source=row.source,
+                    source_version=row.source_version,
+                    collected_at=row.collected_at,
+                    valid_until=row.valid_until,
+                )
+
+        # Same content already stored: idempotent no-op, but backfill
+        # provenance on the existing row if it was never recorded.
+        updated = False
+        if existing.source is None and source is not None:
+            existing.source = source
+            updated = True
+        if existing.source_version is None and source_version is not None:
+            existing.source_version = source_version
+            updated = True
+        if existing.collected_at is None and collected_at is not None:
+            existing.collected_at = collected_at
+            updated = True
+        if existing.valid_until is None and valid_until is not None:
+            existing.valid_until = valid_until
+            updated = True
+        if updated:
+            session.add(existing)
+        await session.commit()
         return StoreObjectResponse(
             content_hash=content_hash,
-            storage_uri=str(cas._path_for(content_hash)),
+            storage_uri=storage_uri,
+            source=existing.source,
+            source_version=existing.source_version,
+            collected_at=existing.collected_at,
+            valid_until=existing.valid_until,
         )
 
     @router.get("/v1/evidence/objects/{content_hash:path}")
@@ -867,6 +991,63 @@ def create_app() -> FastAPI:
         )
         await session.commit()
         return {"eval_run_id": request_body.eval_run_id}
+
+    # ------------------------------------------------------------------
+    # Control instance registry persistence (CTRL-STORE) — evidence-vault
+    # is the durable home for control instances per D1. Identity is the
+    # deterministic control_id (D2); manifest_fingerprints tracks the last
+    # manifest fingerprint seen per (tenant, system) (D5).
+    # ------------------------------------------------------------------
+
+    @router.put("/v1/controls")
+    async def upsert_controls_endpoint(
+        request_body: ControlsUpsertRequest,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        items = [item.model_dump(exclude_unset=True) for item in request_body.items]
+        try:
+            result = await upsert_controls(session, items, tenant_id=tenant_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        await session.commit()
+        return {"items": result}
+
+    @router.get("/v1/controls/{system_id}")
+    async def list_controls_endpoint(
+        system_id: str,
+        state: str | None = None,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        items = await list_controls(
+            session, system_id, tenant_id=tenant_id, state=state
+        )
+        return {"items": items}
+
+    @router.get("/v1/fingerprints/{system_id}")
+    async def get_fingerprint_endpoint(
+        system_id: str,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        result = await get_fingerprint(session, system_id, tenant_id=tenant_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Fingerprint not found")
+        return result
+
+    @router.put("/v1/fingerprints/{system_id}")
+    async def put_fingerprint_endpoint(
+        system_id: str,
+        request_body: FingerprintPutRequest,
+        session: AsyncSession = Depends(get_tenant_session),
+        tenant_id: str = Depends(get_tenant_id),
+    ) -> dict:
+        result = await put_fingerprint(
+            session, system_id, request_body.fingerprint, tenant_id=tenant_id
+        )
+        await session.commit()
+        return result
 
     # ------------------------------------------------------------------
     # Portfolio — distinct AI systems on record (PRD §5 — Pro)

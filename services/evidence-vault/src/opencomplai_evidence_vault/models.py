@@ -78,3 +78,9 @@ class EvidenceObjectDB(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Provenance/freshness metadata (EVID-PROV). Nullable — columns added by
+    # migration 0007 (CTRL-STORE).
+    source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    collected_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    valid_until: Mapped[str | None] = mapped_column(String(64), nullable=True)

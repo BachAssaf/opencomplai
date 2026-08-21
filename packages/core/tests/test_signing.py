@@ -156,16 +156,64 @@ def test_an_artifact_signature_is_not_a_badge_signature(tmp_path, sample_artifac
     priv, pub = tmp_path / "signing.key", tmp_path / "signing.pub"
 
     signature = sign_artifact(sample_artifact, priv)
-    badge_preimage = canonical_json_bytes(sample_artifact.model_dump(exclude={"signature"}))
+    badge_preimage = canonical_json_bytes(
+        sample_artifact.model_dump(exclude={"signature"})
+    )
 
     # Before domain separation this assertion was False: the CLI's signature
     # was accepted verbatim by the badge verifier.
     assert (
-        verify_bundle_bytes(badge_preimage, signature, pub, SigningDomain.BADGE) is False
+        verify_bundle_bytes(badge_preimage, signature, pub, SigningDomain.BADGE)
+        is False
     )
     # ...and it still verifies as what it actually is.
     signed = sample_artifact.model_copy(update={"signature": signature})
     assert verify_artifact(signed, pub) is True
+
+
+def test_approval_token_domain_sign_and_verify_round_trip(tmp_path):
+    """HALT-WIRE: the HITL approval token uses its own signing domain
+    (`SigningDomain.APPROVAL_TOKEN`), so a token signature verifies only as
+    a token — not as an artifact/dossier/badge signature over the same
+    bytes, and vice versa."""
+    generate_keypair(tmp_path)
+    priv, pub = tmp_path / "signing.key", tmp_path / "signing.pub"
+    payload = canonical_json_bytes(
+        {
+            "system_id": "sys-a",
+            "commit_ref": "abc123",
+            "halted_at": "2026-08-17T00:00:00+00:00",
+            "approver": "qa@example.com",
+            "issued_at": "2026-08-17T00:05:00+00:00",
+        }
+    )
+
+    signature = sign_bundle_bytes(payload, priv, SigningDomain.APPROVAL_TOKEN)
+
+    assert (
+        verify_bundle_bytes(payload, signature, pub, SigningDomain.APPROVAL_TOKEN)
+        is True
+    )
+    for other in (
+        SigningDomain.ARTIFACT,
+        SigningDomain.DOSSIER_BUNDLE,
+        SigningDomain.BADGE,
+    ):
+        assert verify_bundle_bytes(payload, signature, pub, other) is False
+
+    tampered = canonical_json_bytes(
+        {
+            "system_id": "sys-a-tampered",
+            "commit_ref": "abc123",
+            "halted_at": "2026-08-17T00:00:00+00:00",
+            "approver": "qa@example.com",
+            "issued_at": "2026-08-17T00:05:00+00:00",
+        }
+    )
+    assert (
+        verify_bundle_bytes(tampered, signature, pub, SigningDomain.APPROVAL_TOKEN)
+        is False
+    )
 
 
 def test_untagged_legacy_signatures_do_not_verify(tmp_path):

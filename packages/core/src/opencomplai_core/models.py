@@ -195,6 +195,70 @@ class SystemManifest(BaseModel):
         description="Pointer or description of incident-response procedure (Annex IV Section 3).",
     )
 
+    # Optional Annex IV Sections 4, 6-9 provider attestations. These are
+    # facts only the provider can supply — the engine records them verbatim
+    # and never fabricates them. Absent, the corresponding dossier section
+    # stays an explicit placeholder rather than a silently-omitted point;
+    # for a HIGH-risk system that keeps `annex_iv_complete` False.
+    metrics_appropriateness_rationale: str | None = Field(
+        None,
+        description=(
+            "Free-text rationale for why the reported performance metrics are "
+            "appropriate to the system's intended purpose. "
+            "Required for Annex IV Section 4 in HIGH-risk dossiers."
+        ),
+    )
+    lifecycle_changes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Relevant changes made to the system through its lifecycle. "
+            "Required for Annex IV Section 6 in HIGH-risk dossiers."
+        ),
+    )
+    change_log_reference: str | None = Field(
+        None,
+        description=(
+            "Pointer to the change log documenting the system's lifecycle changes. "
+            "Required for Annex IV Section 6 in HIGH-risk dossiers."
+        ),
+    )
+    harmonised_standards: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Harmonised standards applied in full or in part (Art. 40). "
+            "Required for Annex IV Section 7 in HIGH-risk dossiers."
+        ),
+    )
+    alternative_solutions: str | None = Field(
+        None,
+        description=(
+            "Description of the solutions adopted to meet the requirements where "
+            "no harmonised standards were applied. "
+            "Required for Annex IV Section 7 in HIGH-risk dossiers."
+        ),
+    )
+    eu_declaration_of_conformity_ref: str | None = Field(
+        None,
+        description=(
+            "Reference to the EU declaration of conformity (Art. 47). "
+            "Required for Annex IV Section 8 in HIGH-risk dossiers."
+        ),
+    )
+    post_market_monitoring_plan_ref: str | None = Field(
+        None,
+        description=(
+            "Pointer to the post-market monitoring plan (Art. 72). "
+            "Required for Annex IV Section 9 in HIGH-risk dossiers."
+        ),
+    )
+    post_market_monitoring_summary: str | None = Field(
+        None,
+        description=(
+            "Free-text summary of the post-market monitoring plan. "
+            "Required for Annex IV Section 9 in HIGH-risk dossiers."
+        ),
+    )
+
     operator_role: str | None = Field(
         None,
         description="EU AI Act operator role from compliance checker (provider, deployer, etc.).",
@@ -264,6 +328,14 @@ class ScanStatusArtifact(BaseModel):
     gap_report: "GapReport | None" = Field(
         None, description="Per-article gap status when --with-gaps was used"
     )
+    controls: ControlsSummary | None = Field(
+        None,
+        description=(
+            "Control register summary (D9) — present only when a vault is "
+            "configured and the control sync succeeded; None in OSS/vault-less "
+            "mode or when the sync failed"
+        ),
+    )
 
 
 class LedgerEvent(BaseModel):
@@ -302,11 +374,29 @@ class EvidenceObject(BaseModel):
     will arrive as an explicit design — ciphertext storage needs a key-management
     decision this project has not made, and it changes what a "content hash"
     addresses — not by reinstating this field.
+
+    Provenance and freshness metadata (``source``, ``source_version``,
+    ``collected_at``, ``valid_until``) are optional. They were added after the
+    original three fields, so pre-existing CAS objects and any producer or
+    consumer that predates them remain valid with these fields absent (``None``).
     """
 
     evidence_id: str
     content_hash: str = Field(..., description="SHA-256; also the CAS storage key")
     storage_uri: str = Field(..., description="Local file path or URI")
+    source: str | None = Field(
+        None, description="Identity of the service or tool that collected this evidence"
+    )
+    source_version: str | None = Field(
+        None, description="Version of the collecting service or detector, if known"
+    )
+    collected_at: str | None = Field(
+        None, description="ISO-8601 timestamp when this evidence was collected"
+    )
+    valid_until: str | None = Field(
+        None,
+        description="ISO-8601 timestamp after which this evidence is considered stale",
+    )
 
 
 class VerificationTask(BaseModel):
@@ -462,6 +552,8 @@ class ReviewReason(StrEnum):
     POLICY_BLOCK = "policy_block"
     MANUAL = "manual"
     MANIFEST_DISCREPANCY = "manifest_discrepancy"
+    EVIDENCE_STALE = "evidence_stale"
+    MANIFEST_CHANGE = "manifest_change"
 
 
 class ReviewItem(BaseModel):
@@ -499,6 +591,95 @@ class RedactedReviewContext(BaseModel):
     masked_excerpts: list[str] = Field(default_factory=list)
     aggregate_counts: dict[str, int] = Field(default_factory=dict)
     evidence_hashes: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Control instance registry (CTRL-MODEL)
+# ---------------------------------------------------------------------------
+
+
+class ControlState(StrEnum):
+    """Lifecycle state of a single {system, obligation} control instance."""
+
+    SATISFIED = "satisfied"
+    EVIDENCE_MISSING = "evidence_missing"
+    EVIDENCE_STALE = "evidence_stale"
+    PENDING_REVIEW = "pending_review"
+    WAIVED = "waived"
+
+
+class ControlInstance(BaseModel):
+    """
+    Binds {tenant, system, owner, evidence} to a single compliance obligation.
+
+    One ControlInstance exists per (tenant_id, system_id, obligation_id) triple;
+    `control_id` is the deterministic identity computed by
+    `control_identity.make_control_id`, so repeated upserts across runs are
+    idempotent rather than creating duplicate rows.
+    """
+
+    control_id: str = Field(
+        ..., description="Deterministic sha256(tenant_id|system_id|obligation_id)[:32]"
+    )
+    tenant_id: str
+    system_id: str
+    obligation_id: str = Field(
+        ..., description="Obligation identifier this control instance satisfies"
+    )
+    article_ref: str = Field(
+        ..., description="EU AI Act article reference, e.g. 'Art. 9'"
+    )
+    owner: str | None = Field(
+        None, description="Accountable owner for this control, if assigned"
+    )
+    state: ControlState
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description="Evidence-vault references backing this control",
+    )
+    ttl_days: int | None = Field(
+        None,
+        description=(
+            "Per-control override for evidence freshness TTL, in days. "
+            "Falls back to the control catalog default for this article/obligation "
+            "when None; a catalog default of None means the control never goes stale."
+        ),
+    )
+    last_assessed_at: str | None = Field(
+        None, description="ISO 8601 timestamp of the last control assessment"
+    )
+    last_evidence_at: str | None = Field(
+        None, description="ISO 8601 timestamp of the most recent evidence attached"
+    )
+    due_at: str | None = Field(
+        None, description="ISO 8601 timestamp by which this control is next due"
+    )
+    waiver_rationale: str | None = Field(
+        None, description="Rationale recorded when state is WAIVED"
+    )
+
+
+class ControlSummaryRow(BaseModel):
+    """One compact per-control row embedded in the artifact's `controls` block."""
+
+    control_id: str
+    article_ref: str
+    state: ControlState
+    owner: str | None = None
+    due_at: str | None = None
+
+
+class ControlsSummary(BaseModel):
+    """Optional controls block embedded in `ScanStatusArtifact` (CTRL-ARTIFACT, D9).
+
+    `summary` carries a count for every `ControlState` value (zero-filled for
+    states with no matching control) so consumers never have to special-case a
+    missing key. `items` carries one `ControlSummaryRow` per control instance,
+    in the same order as the derived control list.
+    """
+
+    summary: dict[str, int] = Field(default_factory=dict)
+    items: list[ControlSummaryRow] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -823,7 +1004,8 @@ class ArticleGapStatus(BaseModel):
     status: GapStatus
     source: ArticleGapSource
     evidence_ref: str = Field(
-        ..., description="Rule id, obligation id, evaluator id, or scan finding reference"
+        ...,
+        description="Rule id, obligation id, evaluator id, or scan finding reference",
     )
     rationale: str = ""
     confidence: float | None = Field(
@@ -841,7 +1023,8 @@ class PrincipleStatus(BaseModel):
     title: str
     status: GapStatus
     articles: list[str] = Field(
-        default_factory=list, description="Article references rolled up into this principle"
+        default_factory=list,
+        description="Article references rolled up into this principle",
     )
 
 

@@ -20,18 +20,24 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 import typer
+from opencomplai_core.control_assessment import build_controls_block, derive_controls
+from opencomplai_core.control_catalog import get_catalog
+from opencomplai_core.control_identity import fingerprint_manifest
 from opencomplai_core.engine import assess
 from opencomplai_core.eval_engine import eval_summary_from_report, run_evals
 from opencomplai_core.gap_report import build_gap_report
-from opencomplai_core.principle_report import build_principle_summary
 from opencomplai_core.models import (
     AssessmentInput,
+    ControlInstance,
+    ControlState,
     CorroborationReport,
     DiscrepancySeverity,
+    EvalReport,
     EvalSampleSet,
     EvalSummary,
     EvaluatorOutcome,
@@ -43,14 +49,19 @@ from opencomplai_core.models import (
     ScanStatusArtifact,
     ScanSummary,
     SystemManifest,
+    SystemState,
 )
 from opencomplai_core.output_envelope import wrap_scan_output
+from opencomplai_core.principle_report import build_principle_summary
 from opencomplai_core.recommend_engine import render_recommendations
 from opencomplai_core.report_engine import render_report
 from opencomplai_core.scan_engine import run_scan, scan_summary_from_report
 from opencomplai_core.scanner.feature_types import ScanConfig, ScanProgressCallback
 from opencomplai_core.scanner.ocignore import ensure_ocignore
 from opencomplai_core.scanner.registry import DETECTOR_REGISTRY
+from opencomplai_core.service_auth import load_shared_secret, mint_service_token
+from opencomplai_core.state_machine import TRAP_DETECTED_EVENT, transition
+from opencomplai_core.system_state_store import load_state, save_state, state_record
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -73,7 +84,6 @@ from opencomplai_cli import (
     SUITE_PACKAGES,
     __version__,
 )
-from opencomplai_cli._encoding import install_ascii_fallback
 
 app = typer.Typer(
     name="opencomplai",
@@ -91,6 +101,7 @@ keys_app = typer.Typer(
     help="Signing key management (ISO 27001 A.8.24 / FedRAMP SC-12)."
 )
 
+from opencomplai_cli._encoding import install_ascii_fallback  # noqa: E402
 from opencomplai_cli.commands.checker import (  # noqa: E402
     build_checker_session_ref,
     display_results,
@@ -99,12 +110,19 @@ from opencomplai_cli.commands.checker import (  # noqa: E402
     run_interactive_wizard,
     write_exports,
 )
+from opencomplai_cli.commands.controls import app as controls_app  # noqa: E402
 from opencomplai_cli.commands.dashboard import app as dashboard_app  # noqa: E402
+from opencomplai_cli.commands.halt import approve_cmd, resume_cmd  # noqa: E402
 from opencomplai_cli.commands.interactive_init import run_interactive_init  # noqa: E402
 from opencomplai_cli.commands.push import run_push  # noqa: E402
 from opencomplai_cli.commands.serve import run_serve  # noqa: E402
 
 ai_app = typer.Typer(help="AI intent analysis commands.")
+
+# Must run before the first byte is written: on a Windows console left on its
+# default OEM code page, the em dash in the --help banner is unencodable and
+# aborts the command mid-render. See opencomplai_cli._encoding.
+install_ascii_fallback(sys.stdout, sys.stderr)
 
 app.add_typer(risk_app, name="risk")
 app.add_typer(docs_app, name="docs")
@@ -112,11 +130,12 @@ app.add_typer(sync_app, name="sync")
 app.add_typer(dashboard_app, name="dashboard")
 app.add_typer(keys_app, name="keys")
 app.add_typer(ai_app, name="ai")
-
-# Must run before the first byte is written: on a Windows console left on its
-# default OEM code page, the em dash in the --help banner is unencodable and
-# aborts the command mid-render. See opencomplai_cli._encoding.
-install_ascii_fallback(sys.stdout, sys.stderr)
+app.add_typer(controls_app, name="controls")
+# HALT-WIRE: `approve`/`resume` are top-level commands (not a sub-typer),
+# implemented in commands/halt.py and registered here to avoid a circular
+# import (halt.py needs `console`/`_emit_event` from this module, lazily).
+app.command("approve")(approve_cmd)
+app.command("resume")(resume_cmd)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -125,6 +144,14 @@ _OPENCOMPLAI_DIR = Path.home() / ".opencomplai"
 _CONFIG_FILE = _OPENCOMPLAI_DIR / "config.yaml"
 _SIGNING_KEY = _OPENCOMPLAI_DIR / "signing.key"
 _SIGNING_PUB = _OPENCOMPLAI_DIR / "signing.pub"
+
+
+def _state_dir() -> Path:
+    """HALT-WIRE system-state directory. Defaults to `_OPENCOMPLAI_DIR`;
+    overridable via OPENCOMPLAI_STATE_DIR so tests/CI never touch the real
+    ~/.opencomplai."""
+    override = os.environ.get("OPENCOMPLAI_STATE_DIR")
+    return Path(override) if override else _OPENCOMPLAI_DIR
 
 
 class OutputFormat(StrEnum):
@@ -323,6 +350,170 @@ def _emit_event(
 
 
 # ---------------------------------------------------------------------------
+# Control register sync (CTRL-ASSESS) — talks to the evidence-vault CTRL-STORE
+# endpoints directly (PUT/GET), not through the gateway `_call_service` above.
+# ---------------------------------------------------------------------------
+
+
+def _service_base(env_name: str) -> str:
+    """Trailing-slash-stripped base URL for an internal service from its env
+    var, or "" if unset/blank — the single place every `*_configured()` /
+    `*_request()` pair reads its base URL from."""
+    return os.environ.get(env_name, "").strip().rstrip("/")
+
+
+def _vault_configured() -> bool:
+    """D11: vault-less OSS mode when OPENCOMPLAI_VAULT_URL is unset/empty."""
+    return bool(_service_base("OPENCOMPLAI_VAULT_URL"))
+
+
+def _internal_service_headers(service_name: str) -> dict[str, str]:
+    """Signed service-token header (SEC-SERVICE-AUTH) plus X-Tenant-Id, shared
+    by every internal service the CLI calls directly (evidence-vault,
+    risk-engine, ...)."""
+    headers = {
+        "Content-Type": "application/json",
+        "X-Tenant-Id": os.environ.get("OPENCOMPLAI_TENANT_ID", "oss-default"),
+    }
+    secret = load_shared_secret()
+    if secret is not None:
+        headers["Authorization"] = f"Bearer {mint_service_token(service_name, secret)}"
+    return headers
+
+
+def _vault_headers() -> dict[str, str]:
+    """Alias kept for existing call sites; identical to `_internal_service_headers`."""
+    return _internal_service_headers("opencomplai-cli")
+
+
+def _vault_request(method: str, path: str, body: dict | None = None) -> dict:
+    base_url = _service_base("OPENCOMPLAI_VAULT_URL")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers=_vault_headers(),
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return json.loads(response.read())
+
+
+def _risk_engine_configured() -> bool:
+    """CTRL-FRESH: reassessment against risk-engine is skipped (with a note)
+    when OPENCOMPLAI_RISK_ENGINE_URL is unset/empty — same vault-less-style
+    opt-in as `_vault_configured`."""
+    return bool(_service_base("OPENCOMPLAI_RISK_ENGINE_URL"))
+
+
+def _risk_engine_request(method: str, path: str, body: dict | None = None) -> dict:
+    base_url = _service_base("OPENCOMPLAI_RISK_ENGINE_URL")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        headers=_internal_service_headers("opencomplai-cli"),
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return json.loads(response.read())
+
+
+def _sync_controls_to_vault(
+    report: GapReport, manifest: SystemManifest, *, quiet: bool
+) -> list[ControlInstance] | None:
+    """Upsert control instances derived from `report` + the manifest fingerprint.
+
+    Fully skipped (no output at all) when no vault is configured — D11
+    vault-less OSS mode. When a vault is configured, any failure here is a
+    warning only: `gaps`/`check` stay informational for this side effect and
+    their own exit code / primary output is unaffected.
+
+    Returns the derived control list on success so a caller (the `check`
+    local path) can build the artifact's optional `controls` block (D9) from
+    the same run without a second vault round trip. Returns `None` when
+    vault-less or when the sync failed — in both cases the caller must omit
+    the `controls` block rather than write a stale or fabricated one.
+    """
+    if not _vault_configured():
+        return None
+
+    try:
+        tenant_id = os.environ.get("OPENCOMPLAI_TENANT_ID", "oss-default")
+        existing_items = _vault_request(
+            "GET", f"/v1/controls/{manifest.system_id}"
+        )["items"]
+        existing = [ControlInstance.model_validate(item) for item in existing_items]
+        derived = derive_controls(
+            report, manifest, get_catalog(), existing, tenant_id=tenant_id
+        )
+        _vault_request(
+            "PUT",
+            "/v1/controls",
+            {"items": [c.model_dump(mode="json") for c in derived]},
+        )
+        fingerprint = fingerprint_manifest(manifest)
+
+        if not quiet:
+            satisfied = sum(1 for c in derived if c.state == ControlState.SATISFIED)
+            missing = sum(
+                1 for c in derived if c.state == ControlState.EVIDENCE_MISSING
+            )
+            console.print(
+                f"[dim]Control register synced to vault: {len(derived)} controls "
+                f"({satisfied} satisfied, {missing} evidence_missing) — "
+                f"fingerprint {fingerprint[:12]}[/dim]"
+            )
+
+        if _risk_engine_configured():
+            # The reassess endpoint stores the fingerprint itself — the CLI
+            # must not also PUT it, or a manifest-change comparison next run
+            # would compare against a fingerprint the CLI already overwrote.
+            try:
+                result = _risk_engine_request(
+                    "POST",
+                    "/v1/controls/reassess",
+                    {
+                        "system_id": manifest.system_id,
+                        "commit_ref": manifest.commit_ref,
+                        "current_fingerprint": fingerprint,
+                    },
+                )
+                if not quiet:
+                    console.print(
+                        "[dim]Reassessment: manifest changed="
+                        f"{result.get('manifest_changed')}, "
+                        f"{len(result.get('stale_controls', []))} controls stale, "
+                        f"{len(result.get('review_items_enqueued', []))} review "
+                        "items enqueued[/dim]"
+                    )
+            except Exception as exc:
+                if not quiet:
+                    err_console.print(
+                        f"[yellow]Warning:[/yellow] reassessment failed: {exc}"
+                    )
+        else:
+            _vault_request(
+                "PUT",
+                f"/v1/fingerprints/{manifest.system_id}",
+                {"fingerprint": fingerprint},
+            )
+            if not quiet:
+                console.print(
+                    "[dim]Reassessment skipped: OPENCOMPLAI_RISK_ENGINE_URL not "
+                    "set[/dim]"
+                )
+
+        return derived
+    except Exception as exc:
+        if not quiet:
+            err_console.print(
+                f"[yellow]Warning:[/yellow] control register sync failed: {exc}"
+            )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # ScanStatusArtifact helpers
 # ---------------------------------------------------------------------------
 
@@ -361,6 +552,34 @@ def _result_from_local(risk_result) -> tuple[ScanResult, list[str]]:
     if risk_result.rules_failed > 0:
         return ScanResult.CONTROL_FAIL, failed_ids
     return ScanResult.PASS, failed_ids
+
+
+def _maybe_halt_system(system_id: str, commit_ref: str, reason: str) -> None:
+    """HALT-WIRE / E-12(a): persist HALTED_PENDING_REVIEW when this `check`
+    run hit a trap or an unresolved HIGH-risk corroboration gap, via the
+    existing `state_machine.transition()` rule (RUNNING -> HALTED_PENDING_
+    REVIEW on `trap_detected`). A system that is already halted (or in
+    INCIDENT_MODE) is left untouched — `transition()` only allows this edge
+    from RUNNING, so a repeat trigger is a silent no-op rather than
+    clobbering the original halt record that a token will later be bound
+    to."""
+    state_dir = _state_dir()
+    current_state = load_state(state_dir, system_id)
+    result = transition(current_state, TRAP_DETECTED_EVENT)
+    if not result.success:
+        return
+    save_state(
+        state_dir, system_id, result.new_state, reason=reason, commit_ref=commit_ref
+    )
+    _emit_event(
+        "system_halted",
+        {"system_id": system_id, "commit_ref": commit_ref, "reason": reason},
+    )
+    err_console.print(
+        f"[bold red]System {system_id} HALTED_PENDING_REVIEW ({reason}). "
+        "'opencomplai docs generate' is blocked until "
+        "'opencomplai resume --approval-token …'.[/bold red]"
+    )
 
 
 def _exit_code(result: ScanResult, scan_mode: str) -> int:
@@ -990,6 +1209,12 @@ def gaps_cmd(
         sample_set = sample_set.model_copy(update={"commit_ref": commit_ref})
         eval_report = run_evals(manifest.system_id, commit_ref, sample_set)
 
+    # D10 sidecars: keep the on-disk scan/eval reports the most recent ones,
+    # same contract as `check` — only writes what actually ran here.
+    _write_sidecar_reports(
+        corroboration_report, eval_report, quiet=(output == OutputFormat.json)
+    )
+
     report = build_gap_report(
         system_id=manifest.system_id,
         commit_ref=commit_ref,
@@ -1000,6 +1225,8 @@ def gaps_cmd(
     )
     principle_summary = build_principle_summary(report)
     report = report.model_copy(update={"principle_summary": principle_summary})
+
+    _sync_controls_to_vault(report, manifest, quiet=(output == OutputFormat.json))
 
     if output == OutputFormat.json:
         envelope = wrap_scan_output(
@@ -1230,12 +1457,12 @@ def _run_pipeline_evals(
     api_available: bool,
     *,
     quiet: bool = False,
-) -> tuple[EvalSummary | None, list[str], list[str]]:
-    """Returns (eval_summary, extra_failed_controls, extra_evidence_hashes)."""
+) -> tuple[EvalSummary | None, list[str], list[str], EvalReport | None]:
+    """Returns (eval_summary, extra_failed_controls, extra_evidence_hashes, eval_report)."""
     if sample_set is None:
         if api_available is False and not quiet:
             console.print("[dim]Evals: no eval sample set supplied (skipped)[/dim]")
-        return None, [], []
+        return None, [], [], None
 
     sample = sample_set.model_copy(update={"commit_ref": commit_ref})
     extra_hashes: list[str] = []
@@ -1253,7 +1480,6 @@ def _run_pipeline_evals(
             if status >= 400:
                 err_console.print(f"[red]Eval service error:[/red] {data}")
                 sys.exit(2)
-            from opencomplai_core.models import EvalReport
 
             report = EvalReport.model_validate(data)
             extra_hashes.extend(data.get("evidence_hashes", []))
@@ -1268,7 +1494,21 @@ def _run_pipeline_evals(
     failed = [
         r.evaluator_id for r in report.results if r.outcome == EvaluatorOutcome.FAIL
     ]
-    return summary, failed, extra_hashes
+    return summary, failed, extra_hashes, report
+
+
+def _evidence_provenance(detector_version: str | None = None) -> dict:
+    """
+    Provenance metadata (EVID-PROV) attached to CLI-emitted evidence payloads —
+    identifies the CLI as the collecting source and when collection happened.
+    """
+    provenance = {
+        "source": "opencomplai-cli",
+        "source_version": __version__,
+        "detector_version": detector_version,
+        "collected_at": datetime.now(UTC).isoformat(),
+    }
+    return {k: v for k, v in provenance.items() if v is not None}
 
 
 def _redacted_report_payload(report: CorroborationReport) -> dict:
@@ -1286,6 +1526,7 @@ def _redacted_report_payload(report: CorroborationReport) -> dict:
         "report_hash": report.report_hash,
         "locations": sorted({loc for ev in report.evidence for loc in ev.locations}),
         "rationale_codes": sorted({ev.rationale_code for ev in report.evidence}),
+        "provenance": _evidence_provenance(detector_version=report.scanner_version),
     }
 
 
@@ -2086,6 +2327,30 @@ def scan_cmd(
     sys.exit(0)
 
 
+def _write_sidecar_reports(
+    scan_report: CorroborationReport | None,
+    eval_report: EvalReport | None,
+    *,
+    quiet: bool = False,
+) -> None:
+    """
+    Write full scan-report.json / eval-report.json sidecars beside
+    compliance-artifact.json (D10) so `opencomplai docs generate` can load
+    the most recent scan/eval evidence from disk. Only writes what actually
+    ran — absence of either report is never fabricated.
+    """
+    if scan_report is not None:
+        path = Path("scan-report.json")
+        path.write_text(scan_report.model_dump_json(indent=2))
+        if not quiet:
+            console.print(f"[dim]Artifact written to {path}[/dim]")
+    if eval_report is not None:
+        path = Path("eval-report.json")
+        path.write_text(eval_report.model_dump_json(indent=2))
+        if not quiet:
+            console.print(f"[dim]Artifact written to {path}[/dim]")
+
+
 @app.command("check")
 def check_cmd(
     manifest_file: Path = typer.Option(
@@ -2165,7 +2430,7 @@ def check_cmd(
 
     api_available = bool(os.environ.get("OPENCOMPLAI_API_URL", "").strip())
     sample_set = _load_sample_set(sample_set_file, manifest)
-    eval_summary, eval_failed, eval_hashes = _run_pipeline_evals(
+    eval_summary, eval_failed, eval_hashes, eval_report = _run_pipeline_evals(
         manifest,
         commit_ref,
         sample_set,
@@ -2196,7 +2461,7 @@ def check_cmd(
         scan_failed = _scan_should_fail(scan_report, scan_fail_on, baseline_categories)
 
     if api_available:
-        artifact = _run_service_check(
+        artifact, risk_high = _run_service_check(
             manifest,
             commit_ref,
             scan_mode,
@@ -2208,7 +2473,7 @@ def check_cmd(
             scan_summary=scan_summary,
         )
     else:
-        artifact = _run_local_check(
+        artifact, risk_high = _run_local_check(
             manifest,
             commit_ref,
             scan_mode,
@@ -2224,6 +2489,17 @@ def check_cmd(
         artifact = artifact.model_copy(update={"result": ScanResult.CONTROL_FAIL})
         artifact.failed_controls = list(
             dict.fromkeys([*artifact.failed_controls, "CODE_CORROBORATION_GAP"])
+        )
+
+    # HALT-WIRE / E-12(a): halt trigger — trap always halts; an unresolved
+    # HIGH-risk corroboration gap (--scan --fail-on ... failed) halts too,
+    # even when the artifact result itself stays CONTROL_FAIL rather than
+    # TRAP_DETECTED.
+    if artifact.result == ScanResult.TRAP_DETECTED:
+        _maybe_halt_system(manifest.system_id, commit_ref, "trap_detected")
+    elif risk_high and scan_failed:
+        _maybe_halt_system(
+            manifest.system_id, commit_ref, "high_risk_corroboration_failed"
         )
 
     if with_gaps:
@@ -2249,11 +2525,27 @@ def check_cmd(
             corroboration_report=scan_report,
             eval_report=gap_eval_report,
         )
-        artifact = artifact.model_copy(update={"gap_report": gap_report})
+        derived_controls = _sync_controls_to_vault(
+            gap_report, manifest, quiet=(output == OutputFormat.json)
+        )
+        controls_block = (
+            build_controls_block(derived_controls)
+            if derived_controls is not None
+            else None
+        )
+        artifact = artifact.model_copy(
+            update={"gap_report": gap_report, "controls": controls_block}
+        )
 
     # Write artifact to disk for CI consumption
     artifact_path = Path("compliance-artifact.json")
     artifact_path.write_text(artifact.model_dump_json(indent=2))
+
+    # D10 sidecars: full scan/eval reports beside the compact artifact, so
+    # `opencomplai docs generate` can pick up the most recent evidence.
+    _write_sidecar_reports(
+        scan_report, eval_report, quiet=(output == OutputFormat.json)
+    )
 
     if output == OutputFormat.json:
         console.print_json(artifact.model_dump_json(indent=2))
@@ -2273,8 +2565,14 @@ def _run_service_check(
     eval_failed: list[str] | None = None,
     eval_hashes: list[str] | None = None,
     scan_summary: ScanSummary | None = None,
-) -> ScanStatusArtifact:
-    """Full 10-step orchestration via gateway services (PRD §12.4)."""
+) -> tuple[ScanStatusArtifact, bool]:
+    """Full 10-step orchestration via gateway services (PRD §12.4).
+
+    Returns `(artifact, risk_high)` — `risk_high` is True when risk-engine
+    classified this system HIGH risk (HALT-WIRE / E-12(a) needs this
+    alongside the corroboration-scan gate, independently of `artifact.result`,
+    which folds HIGH risk into CONTROL_FAIL rather than keeping it visible).
+    """
     start_ms = time.monotonic()
     evidence_hashes: list[str] = []
     pending_verifications_count = 0
@@ -2305,18 +2603,21 @@ def _run_service_check(
             },
         )
         if status >= 400:
-            return _finalize_artifact(
-                install_id,
-                manifest.system_id,
-                commit_ref,
-                scan_mode,
-                ScanResult.VALIDATION_FAIL,
-                ["MANIFEST_INVALID"],
-                [],
-                "sha256:validation_failed",
-                0,
-                int((time.monotonic() - start_ms) * 1000),
-                sign,
+            return (
+                _finalize_artifact(
+                    install_id,
+                    manifest.system_id,
+                    commit_ref,
+                    scan_mode,
+                    ScanResult.VALIDATION_FAIL,
+                    ["MANIFEST_INVALID"],
+                    [],
+                    "sha256:validation_failed",
+                    0,
+                    int((time.monotonic() - start_ms) * 1000),
+                    sign,
+                ),
+                False,
             )
     except ConnectionError as exc:
         err_console.print(f"[red]Service error:[/red] {exc}")
@@ -2332,18 +2633,21 @@ def _run_service_check(
             },
         )
         if status >= 400:
-            return _finalize_artifact(
-                install_id,
-                manifest.system_id,
-                commit_ref,
-                scan_mode,
-                ScanResult.VALIDATION_FAIL,
-                [],
-                evidence_hashes,
-                "sha256:classify_failed",
-                0,
-                int((time.monotonic() - start_ms) * 1000),
-                sign,
+            return (
+                _finalize_artifact(
+                    install_id,
+                    manifest.system_id,
+                    commit_ref,
+                    scan_mode,
+                    ScanResult.VALIDATION_FAIL,
+                    [],
+                    evidence_hashes,
+                    "sha256:classify_failed",
+                    0,
+                    int((time.monotonic() - start_ms) * 1000),
+                    sign,
+                ),
+                False,
             )
     except ConnectionError as exc:
         err_console.print(f"[red]Service error:[/red] {exc}")
@@ -2352,6 +2656,7 @@ def _run_service_check(
     trap_detected = risk_data.get("trap_detected", False)
     profiling_detected = risk_data.get("profiling_detected", False)
     risk_class = risk_data.get("risk_class", "minimal")
+    risk_high = risk_class == "high"
     rationale_hash = risk_data.get("rationale_hash", "sha256:unknown")
     evidence_event_id = risk_data.get("evidence_event_id", "")
     if evidence_event_id:
@@ -2370,18 +2675,21 @@ def _run_service_check(
         )
         if trap_evt:
             evidence_hashes.append(trap_evt)
-        return _finalize_artifact(
-            install_id,
-            manifest.system_id,
-            commit_ref,
-            scan_mode,
-            ScanResult.TRAP_DETECTED,
-            _controls_from_risk(risk_class, trap_detected, profiling_detected),
-            evidence_hashes,
-            rationale_hash,
-            0,
-            int((time.monotonic() - start_ms) * 1000),
-            sign,
+        return (
+            _finalize_artifact(
+                install_id,
+                manifest.system_id,
+                commit_ref,
+                scan_mode,
+                ScanResult.TRAP_DETECTED,
+                _controls_from_risk(risk_class, trap_detected, profiling_detected),
+                evidence_hashes,
+                rationale_hash,
+                0,
+                int((time.monotonic() - start_ms) * 1000),
+                sign,
+            ),
+            risk_high,
         )
 
     # Step 5 — derive failed controls
@@ -2494,7 +2802,7 @@ def _run_service_check(
         json.loads(artifact.model_dump_json()),
     )
 
-    return artifact
+    return artifact, risk_high
 
 
 def _run_local_check(
@@ -2507,8 +2815,13 @@ def _run_local_check(
     eval_failed: list[str] | None = None,
     eval_hashes: list[str] | None = None,
     scan_summary: ScanSummary | None = None,
-) -> ScanStatusArtifact:
-    """Local engine fallback — no services required."""
+) -> tuple[ScanStatusArtifact, bool]:
+    """Local engine fallback — no services required.
+
+    Returns `(artifact, risk_high)` — see `_run_service_check` for why
+    `risk_high` travels alongside the artifact rather than being read back
+    off `artifact.result` (HALT-WIRE / E-12(a)).
+    """
     start_ms = time.monotonic()
 
     assessment_input = AssessmentInput(
@@ -2521,6 +2834,7 @@ def _run_local_check(
         )
     )
     risk_result = assess(assessment_input)
+    risk_high = risk_result.risk_level == RiskLevel.HIGH
     result, failed_controls = _result_from_local(risk_result)
     if eval_failed:
         failed_controls = list(dict.fromkeys(failed_controls + eval_failed))
@@ -2535,20 +2849,23 @@ def _run_local_check(
     duration_ms = int((time.monotonic() - start_ms) * 1000)
     evidence_hashes = list(eval_hashes or [])
 
-    return _finalize_artifact(
-        install_id,
-        manifest.system_id,
-        commit_ref,
-        scan_mode,
-        result,
-        failed_controls,
-        evidence_hashes,
-        rationale_hash,
-        0,
-        duration_ms,
-        sign,
-        eval_summary=eval_summary,
-        scan_summary=scan_summary,
+    return (
+        _finalize_artifact(
+            install_id,
+            manifest.system_id,
+            commit_ref,
+            scan_mode,
+            result,
+            failed_controls,
+            evidence_hashes,
+            rationale_hash,
+            0,
+            duration_ms,
+            sign,
+            eval_summary=eval_summary,
+            scan_summary=scan_summary,
+        ),
+        risk_high,
     )
 
 
@@ -2711,7 +3028,7 @@ def eval_cmd(
                 api_key=api_key,
                 log_dir=log_dir,
             )
-        except Exception as exc:  # noqa: BLE001 — surface bridge errors cleanly
+        except Exception as exc:
             err_console.print(f"[red]Error:[/red] Inspect-AI suite failed: {exc}")
             sys.exit(2)
         if output == OutputFormat.json:
@@ -2746,7 +3063,7 @@ def eval_cmd(
     assert sample_set is not None
 
     api_available = bool(os.environ.get("OPENCOMPLAI_API_URL", "").strip())
-    summary, _failed, _ = _run_pipeline_evals(
+    summary, _failed, _, _report = _run_pipeline_evals(
         manifest, commit_ref, sample_set, api_available
     )
     assert summary is not None
@@ -2944,10 +3261,42 @@ def docs_generate_cmd(
             "doc-generator so the dossier reflects the real system."
         ),
     ),
+    scan_report_file: Path = typer.Option(
+        Path("scan-report.json"),
+        "--scan-report",
+        help=(
+            "Path to a CorroborationReport JSON file (written by "
+            "`opencomplai check --scan`). When present, Section 5 scanner "
+            "fields are populated. Absence stays honest — never fabricated."
+        ),
+    ),
+    eval_report_file: Path = typer.Option(
+        Path("eval-report.json"),
+        "--eval-report",
+        help=(
+            "Path to an EvalReport JSON file (written by `opencomplai check "
+            "--sample-set ...`). When present, eval-merged metrics are "
+            "populated. Absence stays honest — never fabricated."
+        ),
+    ),
     output_dir: Path = typer.Option(Path("."), "--output-dir"),
     output: OutputFormat = typer.Option(OutputFormat.human, "--output", "-o"),
 ) -> None:
     """Generate an Annex IV technical documentation dossier (REQ-DOC-001)."""
+    # HALT-WIRE / E-12(d): a HALTED_PENDING_REVIEW system refuses dossier
+    # generation outright — no --force bypass. Resuming requires a signed
+    # approval token via `opencomplai resume`.
+    state_dir = _state_dir()
+    if load_state(state_dir, system_id) == SystemState.HALTED_PENDING_REVIEW:
+        record = state_record(state_dir, system_id) or {}
+        err_console.print(
+            f"[red]Dossier generation refused:[/red] system {system_id} is "
+            f"HALTED_PENDING_REVIEW since {record.get('changed_at', 'unknown')} "
+            f"({record.get('reason', 'unspecified')}). Resume with "
+            "'opencomplai resume --approval-token …'."
+        )
+        sys.exit(4)
+
     # Optional manifest passthrough so Section 2/3 inputs reach the generator.
     loaded_manifest: SystemManifest | None = None
     if manifest_file is not None:
@@ -2963,6 +3312,41 @@ def docs_generate_cmd(
         except Exception as exc:
             err_console.print(f"[red]Invalid manifest:[/red] {exc}")
             sys.exit(2)
+
+    # D10: load the most recent scan/eval artifacts `check`/`scan` already
+    # wrote to disk, if present. Absence stays honest — sections remain
+    # exactly the placeholders they are today; never fabricated.
+    scan_report: CorroborationReport | None = None
+    if scan_report_file.exists():
+        try:
+            scan_report = CorroborationReport.model_validate(
+                json.loads(scan_report_file.read_text())
+            )
+        except Exception as exc:
+            err_console.print(
+                f"[yellow]Warning:[/yellow] failed to parse {scan_report_file}: {exc}"
+            )
+    else:
+        console.print(
+            f"[dim]No {scan_report_file} found — Section 5 scanner fields stay "
+            "unpopulated (run 'opencomplai check --scan' first).[/dim]"
+        )
+
+    eval_report: EvalReport | None = None
+    if eval_report_file.exists():
+        try:
+            eval_report = EvalReport.model_validate(
+                json.loads(eval_report_file.read_text())
+            )
+        except Exception as exc:
+            err_console.print(
+                f"[yellow]Warning:[/yellow] failed to parse {eval_report_file}: {exc}"
+            )
+    else:
+        console.print(
+            f"[dim]No {eval_report_file} found — eval-merged metrics stay "
+            "unpopulated (run 'opencomplai check --sample-set ...' first).[/dim]"
+        )
 
     payload: dict = {
         "system_id": system_id,
@@ -2981,8 +3365,20 @@ def docs_generate_cmd(
                 "human_oversight_measures": loaded_manifest.human_oversight_measures,
                 "monitoring_approach": loaded_manifest.monitoring_approach,
                 "incident_response_procedure": loaded_manifest.incident_response_procedure,
+                "metrics_appropriateness_rationale": loaded_manifest.metrics_appropriateness_rationale,
+                "lifecycle_changes": loaded_manifest.lifecycle_changes,
+                "change_log_reference": loaded_manifest.change_log_reference,
+                "harmonised_standards": loaded_manifest.harmonised_standards,
+                "alternative_solutions": loaded_manifest.alternative_solutions,
+                "eu_declaration_of_conformity_ref": loaded_manifest.eu_declaration_of_conformity_ref,
+                "post_market_monitoring_plan_ref": loaded_manifest.post_market_monitoring_plan_ref,
+                "post_market_monitoring_summary": loaded_manifest.post_market_monitoring_summary,
             }
         )
+    if scan_report is not None:
+        payload["corroboration_report"] = scan_report.model_dump(mode="json")
+    if eval_report is not None:
+        payload["eval_report"] = eval_report.model_dump(mode="json")
 
     try:
         status, data = _call_service("/v1/docs/generate", payload)
@@ -3044,7 +3440,13 @@ def docs_generate_cmd(
                 )
             )
         )
-        dossier = generate_dossier(manifest, risk_result, provider_name=provider_name)
+        dossier = generate_dossier(
+            manifest,
+            risk_result,
+            provider_name=provider_name,
+            eval_report=eval_report,
+            corroboration_report=scan_report,
+        )
         schema_valid = validate_dossier_schema(dossier)
 
         output_dir.mkdir(parents=True, exist_ok=True)

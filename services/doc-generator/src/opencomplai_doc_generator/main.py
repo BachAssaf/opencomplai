@@ -22,12 +22,14 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from opencomplai_core.engine import assess
 from opencomplai_core.models import (
     AssessmentInput,
+    CorroborationReport,
+    EvalReport,
     ModelMetadata,
     SystemManifest,
 )
 from opencomplai_core.service_auth import load_shared_secret, mint_service_token
 from opencomplai_core.telemetry import configure_telemetry, metrics_response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from opencomplai_doc_generator.service_auth_dependency import require_service_principal
 
@@ -108,6 +110,22 @@ class GenerateDocsRequest(BaseModel):
     human_oversight_measures: list[str] = Field(default_factory=list)
     monitoring_approach: str | None = None
     incident_response_procedure: str | None = None
+    # E-6: pure passthrough of provider-supplied Annex IV attestation fields
+    # (Sections 4, 6-9). Optional, no defaults, no fabrication — the manifest
+    # this handler builds records them verbatim, same as Section 2/3 above.
+    metrics_appropriateness_rationale: str | None = None
+    lifecycle_changes: list[str] = Field(default_factory=list)
+    change_log_reference: str | None = None
+    harmonised_standards: list[str] = Field(default_factory=list)
+    alternative_solutions: str | None = None
+    eu_declaration_of_conformity_ref: str | None = None
+    post_market_monitoring_plan_ref: str | None = None
+    post_market_monitoring_summary: str | None = None
+    # D10: optional full scan/eval reports passed through from `opencomplai
+    # docs generate` when it found them on disk. Absent stays honest —
+    # generate_dossier leaves the corresponding sections as placeholders.
+    eval_report: dict | None = None
+    corroboration_report: dict | None = None
 
 
 class GenerateDocsResponse(BaseModel):
@@ -271,6 +289,34 @@ async def generate_docs(
     """
     start = time.monotonic()
 
+    # D10: validate the optional full reports before anything else — a
+    # malformed report is a client error (422), not a 500, and must not be
+    # silently dropped.
+    eval_report: EvalReport | None = None
+    if request.eval_report is not None:
+        try:
+            eval_report = EvalReport.model_validate(request.eval_report)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error_code": "INVALID_EVAL_REPORT", "message": str(exc)},
+            ) from exc
+
+    corroboration_report: CorroborationReport | None = None
+    if request.corroboration_report is not None:
+        try:
+            corroboration_report = CorroborationReport.model_validate(
+                request.corroboration_report
+            )
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error_code": "INVALID_CORROBORATION_REPORT",
+                    "message": str(exc),
+                },
+            ) from exc
+
     try:
         manifest = SystemManifest(
             system_id=request.system_id,
@@ -285,6 +331,14 @@ async def generate_docs(
             human_oversight_measures=request.human_oversight_measures,
             monitoring_approach=request.monitoring_approach,
             incident_response_procedure=request.incident_response_procedure,
+            metrics_appropriateness_rationale=request.metrics_appropriateness_rationale,
+            lifecycle_changes=request.lifecycle_changes,
+            change_log_reference=request.change_log_reference,
+            harmonised_standards=request.harmonised_standards,
+            alternative_solutions=request.alternative_solutions,
+            eu_declaration_of_conformity_ref=request.eu_declaration_of_conformity_ref,
+            post_market_monitoring_plan_ref=request.post_market_monitoring_plan_ref,
+            post_market_monitoring_summary=request.post_market_monitoring_summary,
         )
 
         assessment_input = AssessmentInput(
@@ -309,6 +363,8 @@ async def generate_docs(
             risk_result=risk_result,
             ledger_root_hash=ledger_root_hash,
             provider_name=request.provider_name,
+            eval_report=eval_report,
+            corroboration_report=corroboration_report,
         )
 
         schema_valid = validate_dossier_schema(dossier)

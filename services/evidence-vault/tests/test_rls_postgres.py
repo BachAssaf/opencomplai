@@ -20,6 +20,7 @@ from alembic import command
 from alembic.config import Config
 from opencomplai_evidence_vault.badges import BadgeDB
 from opencomplai_evidence_vault.bias_alerts import BiasAlertDB
+from opencomplai_evidence_vault.controls import ControlInstanceDB, ManifestFingerprintDB
 from opencomplai_evidence_vault.hitl import AcceptedOverrideDB, ReviewItemDB
 from opencomplai_evidence_vault.models import LedgerEventDB
 from sqlalchemy import select, text
@@ -222,6 +223,70 @@ async def test_cross_tenant_accepted_override_read_returns_zero_rows(pg_session_
             await session.execute(
                 select(AcceptedOverrideDB).where(
                     AcceptedOverrideDB.tenant_id == "tenant-a"
+                )
+            )
+        ).scalars().all()
+        assert list(rows) == []
+    finally:
+        await session.close()
+
+
+async def test_cross_tenant_control_instance_read_returns_zero_rows(pg_session_factory):
+    """CTRL-STORE: control_instances is RLS-fenced the same as review_items."""
+    admin = pg_session_factory()
+    await admin.execute(text("SET ROLE evidence_vault_admin"))
+    admin.add(
+        ControlInstanceDB(
+            control_id="ctrl-a",
+            tenant_id="tenant-a",
+            system_id="sys-a",
+            obligation_id="Art. 9",
+            article_ref="Art. 9",
+            state="evidence_missing",
+            evidence_refs=[],
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    await admin.commit()
+    await admin.close()
+
+    session = await _tenant_session(pg_session_factory, "tenant-b")
+    try:
+        rows = (
+            await session.execute(
+                select(ControlInstanceDB).where(
+                    ControlInstanceDB.tenant_id == "tenant-a"
+                )
+            )
+        ).scalars().all()
+        assert list(rows) == []
+    finally:
+        await session.close()
+
+
+async def test_cross_tenant_manifest_fingerprint_read_returns_zero_rows(
+    pg_session_factory,
+):
+    """CTRL-STORE: manifest_fingerprints is RLS-fenced the same as control_instances."""
+    admin = pg_session_factory()
+    await admin.execute(text("SET ROLE evidence_vault_admin"))
+    admin.add(
+        ManifestFingerprintDB(
+            tenant_id="tenant-a",
+            system_id="sys-a",
+            fingerprint="a" * 64,
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    await admin.commit()
+    await admin.close()
+
+    session = await _tenant_session(pg_session_factory, "tenant-b")
+    try:
+        rows = (
+            await session.execute(
+                select(ManifestFingerprintDB).where(
+                    ManifestFingerprintDB.tenant_id == "tenant-a"
                 )
             )
         ).scalars().all()

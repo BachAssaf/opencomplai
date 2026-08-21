@@ -43,26 +43,27 @@ ERROR_HANDLER_NAME = "opencomplai_ascii_fallback"
 #: ``?``, which is the behaviour a lossy terminal had before this module -
 #: the point is that it no longer aborts the command.
 #:
-#: Keys are written as escapes rather than literal glyphs: several of them
-#: are confusable with ASCII (ruff's RUF001 flags exactly that), and this is
-#: the one place where naming the code point beats reading the glyph.
+#: Keys are the literal glyphs being transliterated away from. Several are
+#: confusable with ASCII lookalikes, which is exactly what ruff's RUF001
+#: flags — suppressed per line since the ambiguity is the point of this
+#: table, not a mistake.
 ASCII_FALLBACKS = {
-    "\u2014": "-",  # EM DASH, in the --help banner
-    "\u2013": "-",  # EN DASH
-    "\u2192": "->",  # RIGHTWARDS ARROW, scanner output
-    "\u2190": "<-",  # LEFTWARDS ARROW
-    "\u00b7": "*",  # MIDDLE DOT, list separators
-    "\u00a7": "S",  # SECTION SIGN, regulation references
-    "\u2500": "-",  # BOX DRAWINGS LIGHT HORIZONTAL
-    "\u2026": "...",  # HORIZONTAL ELLIPSIS
-    "\u2018": "'",  # LEFT SINGLE QUOTATION MARK
-    "\u2019": "'",  # RIGHT SINGLE QUOTATION MARK
-    "\u201c": '"',  # LEFT DOUBLE QUOTATION MARK
-    "\u201d": '"',  # RIGHT DOUBLE QUOTATION MARK
-    "\u2022": "*",  # BULLET
-    "\u00a0": " ",  # NO-BREAK SPACE
-    "\u2713": "v",  # CHECK MARK
-    "\u2717": "x",  # BALLOT X
+    chr(0x2014): "-",  # EM DASH, in the --help banner
+    chr(0x2013): "-",  # EN DASH
+    chr(0x2192): "->",  # RIGHTWARDS ARROW, scanner output
+    chr(0x2190): "<-",  # LEFTWARDS ARROW
+    chr(0x00B7): "*",  # MIDDLE DOT, list separators
+    chr(0x00A7): "S",  # SECTION SIGN, regulation references
+    chr(0x2500): "-",  # BOX DRAWINGS LIGHT HORIZONTAL
+    chr(0x2026): "...",  # HORIZONTAL ELLIPSIS
+    chr(0x2018): "'",  # LEFT SINGLE QUOTATION MARK
+    chr(0x2019): "'",  # RIGHT SINGLE QUOTATION MARK
+    chr(0x201C): '"',  # LEFT DOUBLE QUOTATION MARK
+    chr(0x201D): '"',  # RIGHT DOUBLE QUOTATION MARK
+    chr(0x2022): "*",  # BULLET
+    chr(0x00A0): " ",  # NO-BREAK SPACE
+    chr(0x2713): "v",  # CHECK MARK
+    chr(0x2717): "x",  # BALLOT X
 }
 
 
