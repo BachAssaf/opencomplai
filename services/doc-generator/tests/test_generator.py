@@ -538,6 +538,58 @@ def test_annex_iv_high_risk_gate_rejects_section3_partially_set():
     assert validate_dossier_schema(dossier) is False
 
 
+def test_high_risk_presumption_gates_completeness_despite_non_matching_purpose():
+    """FINDING 48.6: a declared high_risk_presumption must gate Section 2 /
+    Annex IV completeness the same as a genuine 'high' classification, even
+    when intended_purpose text doesn't keyword-match any Annex III rule."""
+    manifest = SystemManifest(
+        system_id="test",
+        intended_purpose="chatbot",
+        compliance_target="EU_AI_ACT",
+        high_risk_presumption=True,
+        commit_ref="abc123",
+    )
+    risk_result = _make_risk_result("chatbot")
+    assert risk_result.risk_level.value != "high"  # purpose text doesn't match
+
+    dossier = generate_dossier(manifest, risk_result)
+
+    # The presumption must not fabricate the assessed classification...
+    assert dossier.section1.risk_class != "high"
+    # ...but it must still gate completeness as if the system were high-risk.
+    assert dossier.section2_complete is False
+    assert dossier.annex_iv_complete is False
+    assert validate_dossier_schema(dossier, presumed_high=True) is False
+
+
+def test_high_risk_presumption_with_full_attestations_passes_gate():
+    """The same presumed-high, non-matching-purpose system passes once all
+    Section 2 and Annex IV attestations are actually supplied."""
+    manifest = _make_high_risk_manifest_with_annex_iv_attestations().model_copy(
+        update={"intended_purpose": "chatbot"}
+    )
+    risk_result = _make_risk_result("chatbot")
+    assert risk_result.risk_level.value != "high"
+
+    dossier = generate_dossier(manifest, risk_result)
+    assert dossier.section2_complete is True
+    assert dossier.annex_iv_complete is True
+    assert validate_dossier_schema(dossier, presumed_high=True) is True
+
+
+def test_genuine_high_classification_gates_even_without_presumption():
+    """The presumed_high flag must not become the only path to strict
+    gating — a genuinely 'high' classification (no presumption declared)
+    must still require full attestation."""
+    manifest = _make_manifest(purpose="employment screening")
+    assert manifest.high_risk_presumption is False
+    dossier = generate_dossier(manifest, _make_risk_result("employment screening"))
+
+    assert dossier.section1.risk_class == "high"
+    assert dossier.annex_iv_complete is False
+    assert validate_dossier_schema(dossier, presumed_high=False) is False
+
+
 def test_annex_iv_attestations_absent_does_not_affect_minimal_risk():
     """MINIMAL-risk dossiers were never gated on Sections 4/6-9 — behaviour
     must be unchanged now that the manifest can carry those fields."""

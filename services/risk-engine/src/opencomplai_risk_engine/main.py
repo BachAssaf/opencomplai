@@ -139,7 +139,14 @@ class RiskClassifyResponse(BaseModel):
     trap_detected: bool
     score: float
     rationale_hash: str
-    evidence_event_id: str
+    evidence_event_id: str = Field(
+        ...,
+        description=(
+            "Deterministic sha256 digest of the classification request "
+            "(evt_sha256:<hex>) — NOT the id of a ledger event. classify_risk "
+            "does not write to the evidence-vault ledger."
+        ),
+    )
 
 
 def _rationale_hash(result) -> str:
@@ -160,6 +167,15 @@ def _score(result) -> float:
 
 
 def _deterministic_event_id(payload: dict) -> str:
+    """
+    Deterministic SHA-256 digest of `payload`, formatted as `evt_sha256:<hex>`.
+
+    This is NOT a ledger event id — no evidence-vault write happens here. It
+    exists so identical requests are trivially content-addressable/comparable
+    without a ledger round-trip. Callers that need an actual ledger event id
+    must append one explicitly (see `_record_hitl_event*` below) and use the
+    id the vault returns.
+    """
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -230,6 +246,11 @@ async def classify_risk(request: RiskClassifyRequest) -> RiskClassifyResponse:
     )
 
     rationale_hash = _rationale_hash(result)
+    # NOTE: classify_risk makes no evidence-vault/ledger call — only the HITL
+    # override paths (submit_override, run_evals_endpoint) append ledger
+    # events. `evidence_event_id` below is a deterministic digest of this
+    # request, not the id of any appended ledger event; the field name is
+    # kept for API compatibility (see docs/src/api/rest-api.md).
     evidence_event_id = _deterministic_event_id(
         {
             "system_id": request.system_id,

@@ -112,15 +112,32 @@ class TestCheckDossierAnchor(unittest.TestCase):
     _OTHER_TIP = "sha256:" + "b" * 64
 
     def _write_dossier(self, tmp_path: Path, anchor: str | None) -> Path:
+        """Write a dossier in the current schema: the anchor lives under
+        record_keeping (Art. 12 record-keeping split out of Annex IV pt.4)."""
         dossier = {
             "dossier_id": "test-dossier-id",
+            "system_id": "test",
+            "record_keeping": {
+                "ledger_root_hash": anchor,
+                "logging_enabled": True,
+            },
+        }
+        path = tmp_path / "dossier.json"
+        path.write_text(json.dumps(dossier))
+        return path
+
+    def _write_legacy_dossier(self, tmp_path: Path, anchor: str | None) -> Path:
+        """Write a dossier in the pre-split schema: the anchor lives under
+        section4.ledger_root_hash, with no record_keeping section at all."""
+        dossier = {
+            "dossier_id": "legacy-dossier-id",
             "system_id": "test",
             "section4": {
                 "ledger_root_hash": anchor,
                 "logging_enabled": True,
             },
         }
-        path = tmp_path / "dossier.json"
+        path = tmp_path / "legacy_dossier.json"
         path.write_text(json.dumps(dossier))
         return path
 
@@ -185,12 +202,57 @@ class TestCheckDossierAnchor(unittest.TestCase):
             dossier_data = {
                 "dossier": {
                     "dossier_id": "env-test",
-                    "section4": {"ledger_root_hash": self._KNOWN_TIP},
+                    "record_keeping": {"ledger_root_hash": self._KNOWN_TIP},
                 }
             }
             path = tmp_path / "envelope.json"
             path.write_text(json.dumps(dossier_data))
 
+            tips = [self._KNOWN_TIP]
+            mock_resp = self._mock_tips(tips)
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                ok, reason = verify_ledger.check_dossier_anchor(
+                    "http://vault:8002", str(path)
+                )
+            assert ok
+            assert reason == ""
+
+    def test_legacy_section4_location_still_supported_as_fallback(self):
+        """Dossiers generated before the Art. 12 record-keeping split (no
+        record_keeping section at all) must still be verifiable via the
+        legacy section4.ledger_root_hash location."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dossier_path = self._write_legacy_dossier(tmp_path, self._KNOWN_TIP)
+            tips = [self._KNOWN_TIP]
+            mock_resp = self._mock_tips(tips)
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                ok, reason = verify_ledger.check_dossier_anchor(
+                    "http://vault:8002", str(dossier_path)
+                )
+            assert ok
+            assert reason == ""
+
+    def test_record_keeping_location_takes_precedence_over_legacy_section4(self):
+        """When both locations are present (e.g. a dossier written by an old
+        tool version and re-read by this one), record_keeping is current and
+        must win over a stale section4 value."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dossier = {
+                "dossier_id": "mixed-test",
+                "record_keeping": {"ledger_root_hash": self._KNOWN_TIP},
+                "section4": {"ledger_root_hash": self._OTHER_TIP},
+            }
+            path = tmp_path / "mixed_dossier.json"
+            path.write_text(json.dumps(dossier))
+
+            # Only the record_keeping anchor is in history — if the legacy
+            # section4 value were read instead, this would fail.
             tips = [self._KNOWN_TIP]
             mock_resp = self._mock_tips(tips)
             with patch("urllib.request.urlopen", return_value=mock_resp):

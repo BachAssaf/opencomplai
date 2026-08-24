@@ -242,6 +242,10 @@ components:
           type: string
         evidence_event_id:
           type: string
+          description: >-
+            Deterministic evt_sha256:<hex> digest of the classification
+            request. Not the id of a ledger event — POST /v1/risk/classify
+            does not append anything to the evidence-vault ledger.
 
     AppendEventRequest:
       type: object

@@ -367,7 +367,13 @@ async def generate_docs(
             corroboration_report=corroboration_report,
         )
 
-        schema_valid = validate_dossier_schema(dossier)
+        # A declared high_risk_presumption must gate schema validation the
+        # same way it gates annex_iv_complete/section2_complete inside
+        # generate_dossier (FINDING 48.6) — the dossier alone only carries
+        # the assess()-derived risk_class, not the manifest's presumption.
+        schema_valid = validate_dossier_schema(
+            dossier, presumed_high=request.high_risk_presumption
+        )
         dossier_json = dossier.model_dump_json()
 
         content_hash, ledger_event_id = await _persist_dossier(
@@ -410,9 +416,7 @@ async def generate_docs(
 
 
 @router.get("/v1/docs/{dossier_id}")
-async def get_dossier(
-    dossier_id: str, tenant_id: str = Depends(get_tenant_id)
-) -> dict:
+async def get_dossier(dossier_id: str, tenant_id: str = Depends(get_tenant_id)) -> dict:
     """
     Retrieve a previously generated dossier by id.
 
