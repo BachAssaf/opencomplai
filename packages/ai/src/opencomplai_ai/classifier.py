@@ -194,15 +194,15 @@ def _limited_match_signal(entry, token: str, snippet: str) -> str:
 
 
 class IntentClassifier:
-    """Deterministic Annex III signal matcher for the codebert-onnx slot."""
+    """Deterministic Annex III signal matcher for the codebert-onnx slot.
 
-    def __init__(self) -> None:
-        from opencomplai_ai.downloader import ensure_model
-
-        model_path = ensure_model("codebert-onnx")
-        self._model_path = model_path
-        self._session = None
-        self._tokenizer = None
+    Needs no model artifact: classification below is pure code-signal /
+    keyword matching against the Annex III, prohibited-practice, and
+    limited-risk knowledge packs (see ``knowledge/``). There is no ONNX
+    session, no tokenizer, and nothing downloaded on this path — the catalog
+    entry's ``hf_repo``/``filename`` back a separate, optional export flow
+    (``downloader.ensure_model``), not this class.
+    """
 
     def classify(
         self,

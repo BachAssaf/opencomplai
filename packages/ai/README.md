@@ -9,8 +9,9 @@ It adds the `--ai-intent` flag to `opencomplai scan`, classifying how each AI ca
 your code is actually used — its decision autonomy, the subjects it acts on, and which EU
 AI Act risk tier and Annex III area it maps to.
 
-All inference runs **locally** — models execute on your machine via ONNX Runtime or
-llama.cpp. No code or prompts leave your environment.
+All inference runs **locally** — models execute on your machine via llama.cpp, or via a
+deterministic code-signal matcher that needs no model weights at all. No code or prompts
+leave your environment unless you explicitly opt into the `saas` backend.
 
 ## Prerequisites
 
@@ -23,12 +24,18 @@ pip install opencomplai-core   # or the opencomplai / opencomplai-cli suite
 ## Install
 
 ```bash
-# Base install — CodeBERT (ONNX) classification, no extra build deps
+# Base install — only the deterministic codebert-onnx matcher, no download
 pip install opencomplai-ai
 
-# Deep install — adds llama.cpp for generative GGUF models
+# Deep install — required for the default model (qwen2.5-coder-1.5b) and
+# every other generative GGUF model
 pip install "opencomplai-ai[deep]"
 ```
+
+The base install alone can only run `codebert-onnx`. `opencomplai scan --ai-intent`
+resolves `qwen2.5-coder-1.5b` by default, which needs `[deep]` — without it the scan
+fails fast with an actionable message instead of downloading the ~1 GB model first and
+only then discovering it can't be run.
 
 ## Usage
 
@@ -57,29 +64,55 @@ Useful flags:
 
 ## Supported models
 
-The default model (`codebert-onnx`) runs on the base install. The generative GGUF models
-require the `[deep]` extra. Models are downloaded from the Hugging Face Hub on first use
-and cached locally under `~/.opencomplai/`.
+The **default model is `qwen2.5-coder-1.5b`** and requires the `[deep]` extra. GGUF
+models are downloaded from the Hugging Face Hub on first use and cached locally under
+`~/.cache/opencomplai/models/`.
+
+`codebert-onnx` is a **deterministic Annex III / prohibited-practice / limited-risk
+code-signal matcher** — no model weights, no download, runs on the base install. It
+trades recall for speed and zero setup; it is not the default.
 
 | Model ID | Runtime | Size | Needs `[deep]` |
 |---|---|---|---|
-| `codebert-onnx` *(default)* | ONNX Runtime | ~440 MB | no |
+| `codebert-onnx` | deterministic matcher | no download | no |
 | `qwen2.5-coder-0.5b` | llama.cpp | ~400 MB | yes |
-| `qwen2.5-coder-1.5b` *(recommended)* | llama.cpp | ~1.0 GB | yes |
+| `qwen2.5-coder-1.5b` *(default)* | llama.cpp | ~1.0 GB | yes |
 | `smollm2-1.7b` | llama.cpp | ~1.1 GB | yes |
 | `phi-3.5-mini` | llama.cpp | ~2.2 GB | yes |
 | `mistral-7b` | llama.cpp | ~4.1 GB | yes |
 
 ```bash
-opencomplai scan --ai-intent --ai-model qwen2.5-coder-1.5b
+opencomplai scan --ai-intent                              # default: qwen2.5-coder-1.5b, needs [deep]
+opencomplai scan --ai-intent --ai-model codebert-onnx     # no download, no [deep] extra
 ```
 
 ### Model download flow
 
-On first use of a model, the plugin prompts before downloading and shows a progress bar.
-The CodeBERT model has no prebuilt ONNX artifact on the Hub, so it is exported from the
-official PyTorch checkpoint on first run and then cached. Subsequent scans reuse the
-cached model with no network access.
+On first use of a GGUF model, the plugin prompts before downloading and shows a progress
+bar; the download is refused up front (no prompt, no partial download) if `[deep]` isn't
+installed. `codebert-onnx` needs none of this in normal use — it does deterministic
+code-signal matching with no model artifact to fetch.
+
+An explicit prefetch/export of `codebert-onnx` (e.g. via `opencomplai ai configure`) is
+still available for callers that want the artifact anyway: CodeBERT has no prebuilt ONNX
+build on the Hub, so that path exports the official PyTorch checkpoint to ONNX on first
+run. It needs the separate `[onnx]` extra (`optimum[onnxruntime]`) and is unrelated to
+`--ai-intent` classification.
+
+### Optional extras
+
+| Extra | Adds | Needed for |
+|---|---|---|
+| `[deep]` | `llama-cpp-python` | every GGUF model, including the default `qwen2.5-coder-1.5b` |
+| `[onnx]` | `optimum[onnxruntime]` | only an explicit `codebert-onnx` ONNX export/prefetch — not classification |
+
+## Configuration
+
+| Env var | Default | Effect |
+|---|---|---|
+| `OPENCOMPLAI_AI_TIMEOUT_SECONDS` | `10` | Per-callsite timeout for local GGUF inference. A callsite whose completion doesn't finish in time is skipped — never reported as "minimal risk" — and a second call is refused rather than racing the abandoned worker. |
+| `OPENCOMPLAI_OFFLINE` | unset | Block all network access outright: no model downloads, no `saas` calls. |
+| `OPENCOMPLAI_API_KEY` | unset | Required to use the `saas` cloud backend. |
 
 ## Documentation
 

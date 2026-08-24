@@ -21,7 +21,7 @@ from opencomplai_ai.integrity import (
     describe_pin,
     verify_artifact,
 )
-from opencomplai_ai.models import MODEL_CATALOG
+from opencomplai_ai.models import MODEL_CATALOG, ModelNotInstalledError
 
 
 def _confirm(console: Console, prompt: str, *, operation: str) -> None:
@@ -94,6 +94,22 @@ def ensure_model(model_id: str) -> Path:
         verify_artifact(cached_path, spec.sha256, context="cached artifact")
         return cached_path
 
+    # Fail fast on the missing hard dependency *before* pulling the file.
+    # This used to be checked only in registry.resolve(), which runs after
+    # the backend is constructed — for the default model that meant a base
+    # install downloaded the full ~1GB GGUF file and only then discovered it
+    # had no way to run it (finding 48.10). Same error type and message as
+    # registry.resolve() so the actionable text is identical either way.
+    if spec.requires_deep:
+        try:
+            import llama_cpp  # noqa: F401
+        except ImportError:
+            raise ModelNotInstalledError(
+                f"Model '{model_id}' requires llama-cpp-python.\n"
+                f"Run: pip install 'opencomplai-ai[deep]'\n"
+                f"Or choose a lighter model: opencomplai ai configure"
+            ) from None
+
     require_online(f"Downloading {spec.display_name}")
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -147,9 +163,12 @@ def ensure_model(model_id: str) -> Path:
 def _ensure_onnx_export(spec) -> Path:
     """Export the PyTorch checkpoint to ONNX on first use and cache it.
 
-    The classifier loads ``<cache>/codebert-base/model.onnx`` (see
-    ``IntentClassifier._load``), so we export the official ``spec.hf_repo``
-    checkpoint into that directory once and reuse it thereafter.
+    Not used by ``IntentClassifier`` — that backend is a deterministic
+    code-signal matcher with no model artifact (see ``classifier.py``) and
+    never calls ``ensure_model``. This path exists only for an explicit,
+    optional prefetch/export of the ``codebert-onnx`` catalog entry (e.g. the
+    CLI's ``opencomplai ai configure``), which needs the ``[onnx]`` extra
+    (``optimum[onnxruntime]``) installed separately.
     """
     cache_dir = get_cache_dir()
     model_dir = cache_dir / "codebert-base"

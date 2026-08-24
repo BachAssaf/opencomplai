@@ -1,7 +1,5 @@
 """Tests for opencomplai_ai.classifier (deterministic code_signals matcher)."""
 
-from unittest.mock import patch
-
 import pytest
 from opencomplai_ai.classifier import (
     IntentClassifier,
@@ -12,17 +10,23 @@ from opencomplai_ai.models import IntentAnnotation
 
 
 @pytest.fixture
-def classifier(tmp_path):
-    fake_model = tmp_path / "codebert-base-onnx.tar.gz"
-    fake_model.write_bytes(b"fake")
-    with patch(
-        "opencomplai_ai.classifier.IntentClassifier.__init__", lambda self: None
-    ):
-        clf = IntentClassifier.__new__(IntentClassifier)
-        clf._model_path = fake_model
-        clf._session = None
-        clf._tokenizer = None
-        return clf
+def classifier():
+    # No model artifact, no download — IntentClassifier() needs no mocking.
+    return IntentClassifier()
+
+
+def test_classifier_init_triggers_no_download(monkeypatch):
+    """Finding 48.3: construction must not touch downloader.ensure_model."""
+    monkeypatch.setattr(
+        "opencomplai_ai.downloader.ensure_model",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            AssertionError("IntentClassifier must not call ensure_model")
+        ),
+    )
+    clf = IntentClassifier()
+    assert not hasattr(clf, "_session")
+    assert not hasattr(clf, "_tokenizer")
+    assert not hasattr(clf, "_model_path")
 
 
 def test_classify_returns_intent_annotation(classifier):
@@ -158,9 +162,7 @@ def test_classify_vendor_scorecard_is_not_high_risk(classifier):
 
 def test_classify_biometric_area_ignores_product_cue(classifier):
     """Area 1 is not subject_gated; a product cue elsewhere must not suppress it."""
-    result = classifier.classify(
-        "embedding = face_recognition.encode(product_photo)"
-    )
+    result = classifier.classify("embedding = face_recognition.encode(product_photo)")
     assert result.annex_iii_area == 1
 
 

@@ -39,6 +39,7 @@ class SaaSIntentClient:
         *,
         token: str = "",
         ai_usage_type: str | None = None,
+        gate_reason: str | None = None,
         legacy: bool = False,
     ) -> IntentAnnotation | None:
         # Checked before the API key: offline mode is a hard operator policy
@@ -134,6 +135,7 @@ class SaaSIntentClient:
                 subject_type=subject,  # type: ignore[arg-type]
                 consequential=consequential,  # type: ignore[arg-type]
                 eu_obligation=obligations,
+                gate_reason=gate_reason,
                 explanation=data.get("explanation"),
                 model_id="saas",
                 confidence=data.get("confidence", 0.9),

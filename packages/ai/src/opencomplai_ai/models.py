@@ -6,6 +6,10 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from opencomplai_core.knowledge.subject_cues import (
+    NATURAL_PERSON_CUES,
+    PRODUCT_OR_ENTITY_CUES,
+)
 from pydantic import BaseModel, Field
 
 DecisionAutonomy = Literal[
@@ -33,89 +37,13 @@ _AREA_TO_SIGNAL_CATEGORY: dict[int, str] = {
 
 # ── Natural-person subject gating ────────────────────────────────────────
 #
-# Several Annex III sub-points (credit scoring, insurance pricing, benefit
-# eligibility, employment, education, recidivism, migration risk, ...) only
-# regulate systems that score/profile a *natural person*. The regulation
-# text is explicit about this scope (e.g. Annex III 5(b): "creditworthiness
-# of natural persons"). A pure keyword/code-signal match on "credit_score"
-# or "risk_score" cannot tell a consumer-lending decision apart from a bond
-# desk pricing counterparty risk, a fraud model scoring a transaction, or a
-# vendor-risk dashboard scoring a supplier — both use identical vocabulary.
-#
-# These two cue sets let matchers distinguish the two without needing the
-# LLM backend: presence of a person cue confirms the natural-person
-# reading; presence of a product/entity cue with no person cue in the same
-# text is evidence the subject is not a natural person. Ambiguous text
-# (neither list matches) stays high-risk — a missed compliance flag is
-# worse than a reviewable one, so gating only downgrades on positive
-# evidence of a non-person subject, never on absence of evidence.
-NATURAL_PERSON_CUES: frozenset[str] = frozenset(
-    {
-        "applicant",
-        "borrower",
-        "consumer",
-        "customer",
-        "citizen",
-        "individual",
-        "person",
-        "people",
-        "user",
-        "employee",
-        "candidate",
-        "worker",
-        "student",
-        "patient",
-        "resident",
-        "claimant",
-        "policyholder",
-        "tenant",
-        "beneficiary",
-        "household",
-        "voter",
-        "defendant",
-        "offender",
-        "suspect",
-        "migrant",
-        "asylum_seeker",
-        "traveler",
-        "victim",
-    }
-)
-
-PRODUCT_OR_ENTITY_CUES: frozenset[str] = frozenset(
-    {
-        "portfolio",
-        "counterparty",
-        "vendor",
-        "supplier",
-        "merchant",
-        "bond",
-        "security",
-        "securities",
-        "instrument",
-        "commercial",
-        "corporate",
-        "b2b",
-        "sku",
-        "product",
-        "inventory",
-        "shipment",
-        "transaction",
-        "invoice",
-        "asset",
-        "fund",
-        "issuer",
-        "entity",
-        "company",
-        "business",
-        "wholesale",
-        "fleet",
-        "device",
-        "sensor",
-        "machine",
-        "equipment",
-    }
-)
+# NATURAL_PERSON_CUES and PRODUCT_OR_ENTITY_CUES (imported above) are
+# bundled into core (opencomplai_core.knowledge.subject_cues — see that
+# module's docstring for the full rationale) so opencomplai_core.rules
+# gates on the same non-empty cue sets whether or not this optional plugin
+# is installed. Re-exported here at the same names for backward
+# compatibility with existing opencomplai-ai importers; edit the cue
+# contents only in core.
 
 
 def subject_looks_like_natural_person(text: str) -> bool | None:
@@ -136,6 +64,16 @@ def subject_looks_like_natural_person(text: str) -> bool | None:
     if has_product:
         return False
     return None
+
+
+class ModelNotInstalledError(RuntimeError):
+    """Raised when a catalog entry's hard runtime dependency is missing.
+
+    Shared by ``registry.resolve`` (checked at backend construction) and
+    ``downloader.ensure_model`` (checked before any download) so both sites
+    raise the identical error type with the identical actionable message —
+    a base install must fail the same way regardless of which one runs first.
+    """
 
 
 @dataclass(frozen=True)
@@ -164,8 +102,15 @@ class ModelSpec:
 MODEL_CATALOG: dict[str, ModelSpec] = {
     "codebert-onnx": ModelSpec(
         model_id="codebert-onnx",
-        display_name="CodeBERT-base (ONNX)",
-        size_mb=440,
+        # Deterministic Annex III / prohibited-practice / limited-risk
+        # code-signal matcher (see classifier.IntentClassifier) — no model
+        # weights are loaded and nothing is downloaded on the classification
+        # path. hf_repo/filename/runtime below back only the separate,
+        # optional ONNX export exposed via `ensure_model` (e.g. an explicit
+        # `opencomplai ai configure` prefetch), which needs the `[onnx]`
+        # extra and is not part of normal --ai-intent scanning.
+        display_name="CodeBERT code-signal matcher (deterministic, no download)",
+        size_mb=0,
         license="MIT",
         runtime="onnxruntime",
         hf_repo="microsoft/codebert-base",
