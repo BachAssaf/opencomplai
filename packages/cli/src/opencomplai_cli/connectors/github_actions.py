@@ -8,7 +8,9 @@ conventions:
   steps can consume it.
 * Annotates the run summary via ``::notice::`` / ``::warning::`` / ``::error::``
   workflow commands.
-* Propagates exit code: ``result=control_fail`` → non-zero exit (fails the build).
+* Propagates exit code: preserves ``opencomplai check``'s own contract
+  (control_fail→1, validation_fail→2, policy_block→3, trap_detected→4) so a
+  blocked or frozen deployment fails the build rather than passing silently.
 * Publishes the signed status artifact to the dashboard via the standard ingest
   path when ``OPENCOMPLAI_DASHBOARD_URL`` and a bootstrap token are configured.
 
@@ -35,9 +37,13 @@ Environment variables consumed
 
 Exit codes
 ----------
-0  — scan passed (result in {pass, trap_detected}).
-1  — scan failed (result=control_fail) or unexpected error.
-2  — configuration error (missing required env var, bad token, etc.).
+0  — scan passed (result=pass, or result=degraded_complete in local scan mode).
+1  — result=control_fail, or an unexpected non-zero ``check`` exit with no
+     parseable artifact result at all.
+2  — result=validation_fail, or a connector-side configuration error (missing
+     required env var, bad token, etc.).
+3  — result=policy_block (prohibited/Article 5 system).
+4  — result=trap_detected (Article 25 substantial-modification freeze).
 
 Usage in a workflow step
 ------------------------
@@ -68,6 +74,17 @@ from typing import Any
 # relative to whatever cwd the subprocess inherited -- this connector never
 # passes cwd= to subprocess.run, so that is this process's own cwd too.
 _ARTIFACT_FILENAME = "compliance-artifact.json"
+
+# FINDING 48.8: mirrors `opencomplai check`'s own exit-code contract
+# (main.py's `_exit_code` / `ScanResult`) -- a `pass` or `degraded_complete`
+# result and any result absent from this table fall through to the
+# generic 0/`returncode` handling below.
+_EXIT_CODE_BY_RESULT: dict[str, int] = {
+    "control_fail": 1,
+    "validation_fail": 2,
+    "policy_block": 3,
+    "trap_detected": 4,
+}
 
 # ---------------------------------------------------------------------------
 # Platform detection helpers
@@ -155,7 +172,9 @@ def run_connector(
         _set_output("result", artifact_result.get("result", "unknown"))
         _set_output("content_hash", artifact_result.get("content_hash", ""))
 
-    # Annotate.
+    # Annotate. FINDING 48.8: policy_block and validation_fail are CI
+    # failures exactly like control_fail and trap_detected -- all four get
+    # an `error` annotation, not the `notice` a passing/degraded result gets.
     scan_result = artifact_result.get("result", "") if artifact_result else ""
     if scan_result == "control_fail":
         _annotate(
@@ -163,7 +182,19 @@ def run_connector(
             f"Opencomplai: control_fail — {_failed_controls_summary(artifact_result)}",
         )
     elif scan_result == "trap_detected":
-        _annotate("warning", "Opencomplai: trap_detected — review required")
+        _annotate(
+            "error",
+            "Opencomplai: trap_detected — Article 25 deployment freeze, HITL review required",
+        )
+    elif scan_result == "policy_block":
+        _annotate(
+            "error",
+            "Opencomplai: policy_block — prohibited system (EU AI Act Article 5)",
+        )
+    elif scan_result == "validation_fail":
+        _annotate(
+            "error", "Opencomplai: validation_fail — manifest or input validation error"
+        )
     elif scan_result:
         _annotate("notice", f"Opencomplai: {scan_result}")
 
@@ -173,9 +204,12 @@ def run_connector(
     # Publish to dashboard.
     _publish_to_dashboard(artifact_result, _env)
 
-    # Exit code propagation: control_fail is a CI failure.
-    if scan_result == "control_fail":
-        return 1
+    # Exit code propagation: preserve `opencomplai check`'s own exit-code
+    # contract (main.py's `_exit_code`) rather than collapsing everything
+    # but control_fail to a passing build.
+    exit_code = _EXIT_CODE_BY_RESULT.get(scan_result)
+    if exit_code is not None:
+        return exit_code
     if result.returncode != 0 and not scan_result:
         return result.returncode
     return 0

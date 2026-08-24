@@ -8,7 +8,9 @@ Wraps ``opencomplai check`` with GitLab CI platform conventions:
 * Creates a GitLab section for collapsible log output.
 * Sets GitLab environment variables via ``dotenv`` artifact when the
   ``GL_ENV_FILE`` env var is set.
-* Propagates exit code: ``result=control_fail`` → non-zero exit.
+* Propagates exit code: preserves ``opencomplai check``'s own contract
+  (control_fail→1, validation_fail→2, policy_block→3, trap_detected→4) so a
+  blocked or frozen deployment fails the pipeline rather than passing silently.
 * Publishes the signed status artifact to the dashboard via the standard
   ingest path when configured.
 
@@ -36,9 +38,13 @@ Environment variables consumed
 
 Exit codes
 ----------
-0  — pass.
-1  — control_fail or unexpected error.
-2  — configuration error.
+0  — scan passed (result=pass, or result=degraded_complete in local scan mode).
+1  — result=control_fail, or an unexpected non-zero ``check`` exit with no
+     parseable artifact result at all.
+2  — result=validation_fail, or a connector-side configuration error (missing
+     required env var, bad token, etc.).
+3  — result=policy_block (prohibited/Article 5 system).
+4  — result=trap_detected (Article 25 substantial-modification freeze).
 
 Usage in .gitlab-ci.yml
 ------------------------
@@ -78,6 +84,17 @@ RUNNING_IN_GITLAB = os.environ.get("GITLAB_CI") == "true"
 # relative to whatever cwd the subprocess inherited -- this connector never
 # passes cwd= to subprocess.run, so that is this process's own cwd too.
 _ARTIFACT_FILENAME = "compliance-artifact.json"
+
+# FINDING 48.8: mirrors `opencomplai check`'s own exit-code contract
+# (main.py's `_exit_code` / `ScanResult`) -- a `pass` or `degraded_complete`
+# result and any result absent from this table fall through to the
+# generic 0/`returncode` handling below.
+_EXIT_CODE_BY_RESULT: dict[str, int] = {
+    "control_fail": 1,
+    "validation_fail": 2,
+    "policy_block": 3,
+    "trap_detected": 4,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +141,31 @@ def _build_junit_xml(artifact: dict | None, stdout: str) -> str:
             )
             failure.text = stdout
         elif result == "trap_detected":
-            warn = ET.SubElement(case, "system-out")
-            warn.text = "trap_detected — review required"
+            # FINDING 48.8: trap_detected now fails the build (exit 4) --
+            # a <system-out> here would leave the JUnit case green while the
+            # pipeline itself goes red, which is the exact silent mismatch
+            # the finding called out. Report it as a failure like the other
+            # CI-failing results below.
+            failure = ET.SubElement(
+                case,
+                "failure",
+                message="trap_detected — Article 25 deployment freeze, HITL review required",
+            )
+            failure.text = stdout
+        elif result == "policy_block":
+            failure = ET.SubElement(
+                case,
+                "failure",
+                message="policy_block — prohibited system (EU AI Act Article 5)",
+            )
+            failure.text = stdout
+        elif result == "validation_fail":
+            failure = ET.SubElement(
+                case,
+                "failure",
+                message="validation_fail — manifest or input validation error",
+            )
+            failure.text = stdout
     else:
         ET.SubElement(case, "error", message="No artifact result parsed")
 
@@ -198,12 +238,33 @@ def run_connector(
     # Dashboard publish.
     _publish_to_dashboard(artifact_result, _env)
 
-    # Exit code propagation.
+    # Exit code propagation. FINDING 48.8: policy_block and validation_fail
+    # are pipeline failures exactly like control_fail and trap_detected --
+    # preserve `opencomplai check`'s own exit-code contract instead of
+    # collapsing everything but control_fail to a passing pipeline.
     if scan_result == "control_fail":
         print(
             f"FAIL: control_fail — {', '.join(str(c) for c in (artifact_result or {}).get('failed_controls', []))}"
         )
-        return 1
+    elif scan_result == "trap_detected":
+        print(
+            "FAIL: trap_detected — Article 25 deployment freeze, HITL review required",
+            file=sys.stderr,
+        )
+    elif scan_result == "policy_block":
+        print(
+            "FAIL: policy_block — prohibited system (EU AI Act Article 5)",
+            file=sys.stderr,
+        )
+    elif scan_result == "validation_fail":
+        print(
+            "FAIL: validation_fail — manifest or input validation error",
+            file=sys.stderr,
+        )
+
+    exit_code = _EXIT_CODE_BY_RESULT.get(scan_result)
+    if exit_code is not None:
+        return exit_code
     if result.returncode != 0 and not scan_result:
         return result.returncode
     return 0

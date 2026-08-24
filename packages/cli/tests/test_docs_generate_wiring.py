@@ -24,6 +24,7 @@ from opencomplai_core.models import (
     EvaluatorCategory,
     EvaluatorOutcome,
     EvaluatorResult,
+    SystemManifest,
 )
 from typer.testing import CliRunner
 
@@ -261,3 +262,58 @@ def test_check_scan_writes_scan_report_sidecar(tmp_path, monkeypatch):
     assert scan_report_path.exists()
     parsed = CorroborationReport.model_validate_json(scan_report_path.read_text())
     assert parsed.scanner_version
+
+
+def test_docs_generate_local_fallback_honors_high_risk_presumption_in_schema_check(
+    tmp_path, monkeypatch
+):
+    """
+    A manifest that declares high_risk_presumption=True but whose
+    intended_purpose matches no Annex III keyword (so assess() does not
+    itself classify the system as high risk) and carries no Section 6-9
+    attestations must be reported as schema-INVALID locally, matching the
+    doc-generator service (which passes presumed_high=request.
+    high_risk_presumption into validate_dossier_schema — see services/
+    doc-generator/src/opencomplai_doc_generator/main.py). Before the fix,
+    the local fallback called validate_dossier_schema(dossier) with no
+    presumed_high argument, so the attestation checks were skipped and the
+    CLI printed "schema: valid" for a dossier the service would reject.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENCOMPLAI_API_URL", raising=False)
+
+    manifest_path = tmp_path / "system-manifest.json"
+    manifest_path.write_text(
+        SystemManifest(
+            system_id=_SYSTEM_ID,
+            intended_purpose="Not specified",
+            high_risk_presumption=True,
+            commit_ref=_COMMIT_REF,
+        ).model_dump_json(indent=2)
+    )
+
+    output_dir = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        [
+            "docs",
+            "generate",
+            "--system-id",
+            _SYSTEM_ID,
+            "--commit-ref",
+            _COMMIT_REF,
+            "--manifest",
+            str(manifest_path),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    dossier = _single_dossier(output_dir)
+    # The manifest carries no lifecycle/attestation fields, so with the
+    # presumption honored, Annex IV cannot be complete.
+    assert dossier["section1"]["risk_class"] != "high"
+    assert dossier["annex_iv_complete"] is False
+    assert "invalid" in result.output
+    assert "valid" not in result.output.replace("invalid", "")

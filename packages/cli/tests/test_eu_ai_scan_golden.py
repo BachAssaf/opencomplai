@@ -177,7 +177,10 @@ def test_fixture_scan_json_includes_eu_ai_scan():
     # Unwrap the versioned ScanOutputEnvelope -- the scan report lives under
     # `payload`. This assertion used to read the top level, the pre-envelope
     # shape, and had been failing as a permanent baseline failure since.
-    envelope = json.loads(result.output)
+    # Parse stdout, not the merged output: stderr legitimately carries
+    # diagnostics (e.g. "AI intent skipped: ..." when the model's deep
+    # dependencies are absent) while the JSON contract applies to stdout.
+    envelope = json.loads(result.stdout)
     assert envelope["schema_version"] == "1.0"
     data = envelope["payload"]
     assert "eu_ai_scan" in data
