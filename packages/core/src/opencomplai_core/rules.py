@@ -17,6 +17,12 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
+from opencomplai_core.knowledge.subject_cues import (
+    NATURAL_PERSON_CUES as _NATURAL_PERSON_CUES,
+)
+from opencomplai_core.knowledge.subject_cues import (
+    PRODUCT_OR_ENTITY_CUES as _PRODUCT_OR_ENTITY_CUES,
+)
 from opencomplai_core.models import AssessmentInput, RuleResult
 
 
@@ -363,26 +369,17 @@ def _build_subject_gated_keywords() -> frozenset[str]:
     return built
 
 
-_NATURAL_PERSON_CUES: frozenset[str] = frozenset()
-_PRODUCT_OR_ENTITY_CUES: frozenset[str] = frozenset()
-try:
-    from opencomplai_ai.models import NATURAL_PERSON_CUES as _NATURAL_PERSON_CUES
-    from opencomplai_ai.models import PRODUCT_OR_ENTITY_CUES as _PRODUCT_OR_ENTITY_CUES
-except ImportError:
-    pass
-
-
 def _subject_looks_non_person(use_case: str) -> bool:
     """True when the use case text has a product/entity cue and no person cue.
 
     Mirrors opencomplai_ai.models.subject_looks_like_natural_person but
-    inlined against normalize_text's tokenization so rules.py does not take
-    a hard dependency on opencomplai-ai beyond the optional import above.
-    Ambiguous text (no cue either way) returns False — i.e. stays high-risk
-    by default, since a missed flag is worse than an over-flagged one.
+    inlined against normalize_text's tokenization. Both cue sets are bundled
+    in core (opencomplai_core.knowledge.subject_cues), so this holds
+    identically with or without the optional opencomplai-ai plugin
+    installed. Ambiguous text (no cue either way) returns False — i.e.
+    stays high-risk by default, since a missed flag is worse than an
+    over-flagged one.
     """
-    if not _PRODUCT_OR_ENTITY_CUES:
-        return False
     tokens = set(use_case.split())
     if tokens & _NATURAL_PERSON_CUES:
         return False
@@ -622,4 +619,4 @@ RULE_REGISTRY: list[BaseRule] = [
 # Bump when any rule logic, keyword list, or reference changes.
 # Every generated dossier references this version for Annex IV traceability
 # per EU AI Act Art. 11 and post-market monitoring (Art. 72).
-RULE_SET_VERSION = "1.3.0"
+RULE_SET_VERSION = "1.4.0"

@@ -216,6 +216,11 @@ class TestEmptyKnowledgePackFailsLoudly:
         assert rules.UNACCEPTABLE_RISK_SIGNALS
         assert rules.SUBJECT_GATED_KEYWORDS
         assert ProfilingDetectionRule.PROFILING_SIGNALS
+        # Subject-gating cue sets (48.1): bundled in core so installing or
+        # uninstalling the optional opencomplai-ai plugin never silently
+        # changes a pass/fail verdict.
+        assert rules._NATURAL_PERSON_CUES
+        assert rules._PRODUCT_OR_ENTITY_CUES
 
 
 class TestClassificationSurvivesMissingOptionalPlugin:
@@ -238,6 +243,39 @@ class TestClassificationSurvivesMissingOptionalPlugin:
         assert rules._build_subject_gated_keywords()
         assert rules._build_profiling_signals()
 
+    def test_subject_gating_verdict_survives_missing_optional_plugin(self, monkeypatch):
+        """48.1 regression: installing/uninstalling opencomplai-ai must never
+        change a pass/fail verdict. Before the fix, opencomplai_core.rules
+        imported the cue sets from opencomplai_ai.models inside a
+        try/except ImportError, falling back to empty frozensets when the
+        optional plugin was unimportable — which silently turned this
+        bond-portfolio use case from PASS (correct — not a natural person)
+        into FAIL (high-risk) because the empty-set guard made subject
+        gating a no-op.
+
+        rules.py is executed here as an *isolated* module object (not
+        registered as opencomplai_core.rules in sys.modules) with
+        opencomplai_ai poisoned, so a reintroduced try/except would be
+        exercised even though this dev environment has the plugin
+        installed — and without mutating the shared rules module that
+        other test files already imported.
+        """
+        import importlib.util
+
+        for name in ("opencomplai_ai", "opencomplai_ai.models"):
+            monkeypatch.setitem(sys.modules, name, None)
+
+        spec = importlib.util.spec_from_file_location(
+            "opencomplai_core._rules_isolated_test", rules.__file__
+        )
+        isolated_rules = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(isolated_rules)
+
+        result = isolated_rules.AnnexIIIClassifierRule().evaluate(
+            _input("credit risk scorecard for our bond portfolio")
+        )
+        assert result.passed is True
+
 
 class TestOptionalAiPluginReExportsCoreKnowledge:
     """D6: opencomplai-ai must re-export core's pack, never keep a second
@@ -255,3 +293,15 @@ class TestOptionalAiPluginReExportsCoreKnowledge:
         import opencomplai_core.knowledge.prohibited as core_mod
 
         assert ai_mod.PROHIBITED is core_mod.PROHIBITED
+
+    def test_ai_natural_person_cues_is_the_same_object_as_core(self):
+        import opencomplai_ai.models as ai_mod
+        import opencomplai_core.knowledge.subject_cues as core_mod
+
+        assert ai_mod.NATURAL_PERSON_CUES is core_mod.NATURAL_PERSON_CUES
+
+    def test_ai_product_or_entity_cues_is_the_same_object_as_core(self):
+        import opencomplai_ai.models as ai_mod
+        import opencomplai_core.knowledge.subject_cues as core_mod
+
+        assert ai_mod.PRODUCT_OR_ENTITY_CUES is core_mod.PRODUCT_OR_ENTITY_CUES
