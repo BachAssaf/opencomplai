@@ -51,6 +51,14 @@ def test_exists(cas: CASStore):
     assert cas.exists("sha256:" + "f" * 64) is False
 
 
+def test_storage_uri_matches_path_for(cas: CASStore):
+    """FINDING 48.7: storage_uri() must return the same value main.py used
+    to persist via _path_for(), so previously stored evidence_objects rows
+    keep resolving to the same filesystem path."""
+    content_hash = cas.write(b"storage uri check")
+    assert cas.storage_uri(content_hash) == str(cas._path_for(content_hash))
+
+
 # ---------------------------------------------------------------------------
 # Path traversal (M-02) — content_hash must be validated before any
 # filesystem operation, not merely have "sha256:" stripped.
