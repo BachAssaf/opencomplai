@@ -426,7 +426,10 @@ def test_migration_0007_round_trip(tmp_path, monkeypatch):
     cfg = Config(str(_service_root() / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", database_url)
 
-    command.upgrade(cfg, "head")
+    # Target 0007 explicitly: this test pins 0007's own round-trip, and
+    # "head" has moved past it (0008/0009), so `downgrade -1` from head
+    # would revert a different revision than the one under test.
+    command.upgrade(cfg, "0007")
 
     engine = create_engine(database_url)
     inspector = inspect(engine)

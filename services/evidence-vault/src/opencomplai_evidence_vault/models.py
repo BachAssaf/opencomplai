@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import BigInteger, DateTime, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Sentinel tenant_id for OSS/self-hosted callers that carry no tenant context
@@ -19,6 +19,14 @@ class Base(DeclarativeBase):
 
 class LedgerEventDB(Base):
     __tablename__ = "ledger_events"
+    # seq uniqueness is scoped per tenant: each tenant has an independent
+    # chain, and _next_seq computes MAX(seq)+1 from the rows the session can
+    # see — under Postgres RLS that is only the tenant's own rows, so a
+    # global unique index made every tenant except one collide forever
+    # (issue #46).  Migration 0008 applies the same change to migrated DBs.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "seq", name="uq_ledger_events_tenant_seq"),
+    )
 
     event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(
@@ -29,13 +37,17 @@ class LedgerEventDB(Base):
     payload_hash: Mapped[str] = mapped_column(String(71), nullable=False)
     prev_hash: Mapped[str] = mapped_column(String(71), nullable=False)
     signer_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    # seq is an application-assigned monotonically increasing integer that
-    # provides a strict insertion-order tie-breaker when two events share the
-    # same `ts` value.  This can happen on platforms where DateTime has
-    # coarser-than-microsecond resolution (e.g. SQLite on Windows).
-    # append_event() computes MAX(seq)+1 before inserting each event; both
-    # get_chain_tip and verify_chain order by (ts, seq) to remain consistent.
-    seq: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    # seq is an application-assigned monotonically increasing integer and is
+    # the sole, authoritative append-order key for the chain: ts is captured
+    # once in append_event before its retry loop, so under concurrent
+    # writers the loser of a seq race can retry, land a *higher* seq, and
+    # still carry an *earlier* ts than the winner — ordering by ts (even as
+    # a tie-break) can then pick the wrong row as "latest". seq is only ever
+    # claimed via the (tenant_id, seq) unique constraint at insert time, so
+    # it always reflects true commit order. get_chain_tip, verify_chain,
+    # compute_history_tips, and migration 0009's chain rewrite all order by
+    # seq alone. Unique per (tenant_id, seq) — see __table_args__.
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
