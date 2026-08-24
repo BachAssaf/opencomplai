@@ -32,7 +32,7 @@ Optional but recommended:
 | Docker | 24+ |
 | pre-commit | Latest |
 
-Run `./scripts/bootstrap.sh` (macOS/Linux) after cloning to install all dependencies automatically. Windows users should follow the manual steps in [Development Setup](../contributing/development-setup.md).
+Run `./sync/bootstrap.sh` (macOS/Linux) after cloning to install all dependencies automatically. Windows users should follow the manual steps in [Development Setup](../contributing/development-setup.md).
 
 ## Verify your Python version
 

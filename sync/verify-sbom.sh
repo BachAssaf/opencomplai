@@ -3,7 +3,7 @@
 # Opencomplai container image.
 #
 # Usage:
-#   ./scripts/verify-sbom.sh ghcr.io/opencomplai/opencomplai/gateway-api:1.0.0
+#   ./sync/verify-sbom.sh ghcr.io/opencomplai/opencomplai/gateway-api:1.0.0
 #
 # Requires: cosign (>= 2.0), jq.
 # PRD: Phase 14 — supply-chain integrity verification path for users.

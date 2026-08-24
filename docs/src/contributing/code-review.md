@@ -4,7 +4,7 @@
 
 ### Before requesting review
 
-1. All CI checks are green (`ci-python.yml`, `ci-node.yml`, `ci-docker.yml`).
+1. All CI checks are green (`ci-python.yml`, `ci-node.yml`).
 2. The PR description explains *what* changed and *why* — not just *how*.
 3. Breaking changes are documented in the description and noted in `CHANGELOG.md`.
 4. Self-review: read your own diff carefully before adding reviewers.

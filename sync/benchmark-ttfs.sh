@@ -9,8 +9,8 @@
 # Reports mean, min, max, and p95 over N iterations.
 #
 # Usage:
-#   ./scripts/benchmark-ttfs.sh
-#   OPENCOMPLAI_GATEWAY_URL=https://... ITERATIONS=100 ./scripts/benchmark-ttfs.sh
+#   ./sync/benchmark-ttfs.sh
+#   OPENCOMPLAI_GATEWAY_URL=https://... ITERATIONS=100 ./sync/benchmark-ttfs.sh
 #
 # Requirements: bash, curl, python3 (stdlib only)
 

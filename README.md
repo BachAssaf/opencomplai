@@ -63,6 +63,12 @@ pip install -e packages/core -e packages/cli -e packages/sdk-python
 # or, with uv:  uv sync
 ```
 
+`packages/cli` force-includes a committed build artifact,
+`src/opencomplai_cli/data/checker-local.html` (the offline EU AI Act Checker page). It ships
+in the repo so a fresh checkout installs without building it first; regenerate it after
+changing `docs/checker-widget/` with `cd docs/checker-widget && npm ci && node build.mjs &&
+node build-local-html.mjs` — CI verifies it stays in sync with the source.
+
 Then run a first assessment:
 
 ```bash
@@ -169,7 +175,8 @@ opencomplai/
 │   └── migrations/        # Alembic database migrations
 ├── docs/                  # MkDocs documentation (published via GitHub Actions)
 ├── examples/              # Working code examples
-├── scripts/               # bootstrap.sh, doctor.py, verify-sbom.sh
+├── sync/                  # bootstrap.sh, doctor.py, verify-sbom.sh, demo seed/reset scripts
+├── scripts/               # generate_principle_docs.py
 └── .github/
     ├── workflows/         # GitHub Actions CI workflows
     ├── ISSUE_TEMPLATE/
@@ -201,10 +208,15 @@ after a week, ping the PR directly or ask in
 
 ## AI use
 
-Opencomplai's classification logic is fully deterministic and rule-based. No LLM or ML
-inference is used in production.
+The core rule engine (`packages/core`) and CLI are fully deterministic and rule-based — no
+LLM or ML inference. An optional `packages/ai` plugin adds local ML/LLM inference (an
+ONNX/transformers intent classifier, with an optional `[deep]` extra for local GGUF models
+via llama-cpp-python); it is not installed or used unless a maintainer or contributor
+explicitly opts in.
 
-All dependency files are scanned in CI to enforce this policy. See
+`pyproject.toml`, `package.json`, and `requirements*.txt` files are scanned in CI for
+unapproved AI/LLM packages (excluding `tests/`, `examples/`, `fixtures/`, `node_modules/`,
+`.venv/`, and `dist/` paths). See
 [docs/security/ai-inventory.md](docs/security/ai-inventory.md) for the full inventory and
 the process for approving future AI dependencies.
 

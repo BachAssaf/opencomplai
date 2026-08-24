@@ -419,14 +419,14 @@ The seeder runs automatically on `docker compose up`. To run it manually or expl
 
 === "macOS / Linux"
     ```bash
-    python scripts/seed_demo.py \
+    python sync/seed_demo.py \
       --gateway http://localhost:8080 \
       --vault http://localhost:8002
     ```
 
 === "Windows (PowerShell)"
     ```powershell
-    python scripts\seed_demo.py --gateway http://localhost:8080 --vault http://localhost:8002
+    python sync\seed_demo.py --gateway http://localhost:8080 --vault http://localhost:8002
     ```
 
 ### Tracing a complete narrative end-to-end

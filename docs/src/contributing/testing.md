@@ -172,9 +172,9 @@ Tests run automatically on every pull request via `.github/workflows/ci-python.y
 |---|---|---|
 | `ci-python.yml` | All Python packages | `uv run pytest`, `ruff check`, `ruff format --check` |
 | `ci-node.yml` | `services/gateway-api` | `pnpm test`, `pnpm lint` |
-| `ci-docker.yml` | Docker Compose stack | `docker compose build`, smoke tests |
 
-All three must be green before a PR can merge.
+Both must be green before a PR can merge. There is no `ci-docker.yml` workflow yet — the
+Docker Compose stack is not currently built or smoke-tested in CI.
 
 ---
 
