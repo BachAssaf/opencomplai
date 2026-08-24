@@ -54,7 +54,11 @@ github-issues/
 docs/src/assets/js/checker-widget.js
 docs/checker-widget/src/data/
 docs/checker-widget/node_modules/
-packages/cli/src/opencomplai_cli/data/checker-local.html
+# checker-local.html is committed on purpose: packages/cli/pyproject.toml
+# force-includes it in the wheel, so ignoring it left a fresh clone unable to
+# install by any documented path (issue #48, finding 9). The build is
+# deterministic; CI (ci-node.yml checker-widget job) rebuilds and fails on
+# drift.
 
 # --- Public-repo hardening (keep AI-tooling and internal artifacts out) ---
 .oss-sync-state
