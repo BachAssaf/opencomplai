@@ -63,8 +63,13 @@ def test_parse_annotation_art5_prohibited():
     assert ann.art5_prohibited is True
 
 
-@pytest.mark.parametrize("bad_area", [3.5, "five", None])
+@pytest.mark.parametrize(
+    "bad_area",
+    [3.5, "five", None, float("nan"), float("inf"), float("-inf")],
+)
 def test_parse_annotation_coerces_non_integer_area(bad_area):
+    # nan/inf reach here for real: json.loads accepts the bare NaN/Infinity
+    # tokens, and int() on a non-finite float raises instead of coercing.
     data = {
         "annex_iii_area": bad_area,
         "art5_prohibited": False,
@@ -75,10 +80,7 @@ def test_parse_annotation_coerces_non_integer_area(bad_area):
         "explanation": "",
     }
     ann = _parse_annotation(data, model_id="test", confidence=0.1)
-    if bad_area == 3.5:
-        assert ann.annex_iii_area is None
-    else:
-        assert ann.annex_iii_area is None
+    assert ann.annex_iii_area is None
 
 
 # --------------------------------------------------------------------------
@@ -231,6 +233,24 @@ def test_classify_invalid_json_syntax_sets_malformed_json_failure(explainer):
     assert explainer.last_failure == "malformed_json"
 
 
+def test_classify_nan_area_does_not_crash(explainer):
+    # json.loads accepts the bare NaN token, so the model can hand
+    # _parse_annotation a float("nan") area; int(nan) raises ValueError,
+    # which is not a ValidationError and used to escape classify() entirely
+    # (scan_engine's phase-level except then discarded every AI finding).
+    raw = json.dumps(_LIMITED_RISK_PAYLOAD).replace(
+        '"annex_iii_area": null', '"annex_iii_area": NaN'
+    )
+    assert "NaN" in raw
+    explainer._llama.return_value = _llama_response(raw)
+
+    result = explainer.classify("snippet")
+
+    assert explainer.last_failure is None
+    assert isinstance(result, IntentAnnotation)
+    assert result.annex_iii_area is None
+
+
 _SCHEMA_INVALID_PAYLOAD = {
     "annex_iii_area": None,
     "art5_prohibited": False,
@@ -335,7 +355,16 @@ def test_resolve_timeout_seconds_invalid_value_falls_back(monkeypatch):
 
 def test_resolve_timeout_seconds_non_positive_falls_back(monkeypatch):
     monkeypatch.setenv("OPENCOMPLAI_AI_TIMEOUT_SECONDS", "0")
-    with pytest.warns(UserWarning, match="must be positive"):
+    with pytest.warns(UserWarning, match="positive, finite"):
+        assert _resolve_timeout_seconds() == 10.0
+
+
+@pytest.mark.parametrize("raw", ["inf", "Infinity", "-inf", "nan"])
+def test_resolve_timeout_seconds_non_finite_falls_back(monkeypatch, raw):
+    # float("inf") passes a bare `<= 0` check but crashes Event.wait() with
+    # OverflowError later — inside classify(), where nothing catches it.
+    monkeypatch.setenv("OPENCOMPLAI_AI_TIMEOUT_SECONDS", raw)
+    with pytest.warns(UserWarning, match="positive, finite"):
         assert _resolve_timeout_seconds() == 10.0
 
 

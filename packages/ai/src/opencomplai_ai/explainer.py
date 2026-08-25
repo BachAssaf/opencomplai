@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 import warnings
@@ -41,9 +42,12 @@ def _resolve_timeout_seconds() -> float:
             stacklevel=2,
         )
         return _DEFAULT_TIMEOUT_SECONDS
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
+        # isfinite() also rejects nan: float("inf") would otherwise pass the
+        # positivity check and later crash Event.wait(timeout=inf) with an
+        # OverflowError that escapes classify() entirely.
         warnings.warn(
-            f"{_TIMEOUT_ENV_VAR}={raw!r} must be positive; "
+            f"{_TIMEOUT_ENV_VAR}={raw!r} must be a positive, finite number; "
             f"using default {_DEFAULT_TIMEOUT_SECONDS}s.",
             stacklevel=2,
         )
@@ -142,7 +146,10 @@ def _build_prompt(snippet: str, declared_purpose: str, location: str) -> str:
 def _parse_annotation(data: dict, model_id: str, confidence: float) -> IntentAnnotation:
     area = data.get("annex_iii_area")
     if isinstance(area, float):
-        area = int(area) if area == int(area) else None
+        # json.loads accepts the bare NaN/Infinity tokens, and int() on a
+        # non-finite float raises instead of converting — which would escape
+        # the ValidationError-only guard around this function's caller.
+        area = int(area) if math.isfinite(area) and area == int(area) else None
     if not isinstance(area, int) or area not in range(1, 9):
         area = None
 
