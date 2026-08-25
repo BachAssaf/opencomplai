@@ -84,6 +84,7 @@ from opencomplai_cli import (
     SUITE_PACKAGES,
     __version__,
 )
+from opencomplai_cli.exit_codes import HARD_FAIL_EXIT_CODES
 
 app = typer.Typer(
     name="opencomplai",
@@ -595,10 +596,7 @@ def _maybe_halt_system(system_id: str, commit_ref: str, reason: str) -> None:
 def _exit_code(result: ScanResult, scan_mode: str) -> int:
     mapping = {
         ScanResult.PASS: 0,
-        ScanResult.CONTROL_FAIL: 1,
-        ScanResult.VALIDATION_FAIL: 2,
-        ScanResult.POLICY_BLOCK: 3,
-        ScanResult.TRAP_DETECTED: 4,
+        **HARD_FAIL_EXIT_CODES,
         ScanResult.DEGRADED_COMPLETE: 1 if scan_mode == "ci" else 0,
     }
     return mapping.get(result, 1)

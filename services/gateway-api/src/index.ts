@@ -22,3 +22,8 @@ export function buildApp(): FastifyInstance {
 
   return app;
 }
+
+// Re-exported for the Vercel adapter (api/gateway/[...path].ts), which sits
+// outside this package and cannot resolve 'fastify' from pnpm's strict
+// node_modules layout on its own.
+export type { InjectOptions } from 'fastify';

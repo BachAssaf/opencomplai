@@ -51,6 +51,9 @@ jobs:
           python-version: "3.11"
       - run: uv sync --all-packages
       - run: uv run pytest packages/core -v --tb=short
+      # The Vercel mount-prefix tests are stdlib-only; every job invokes
+      # pytest with explicit paths, so testpaths alone never runs them.
+      - run: uv run pytest api/_shared -v --tb=short
 
   test-cli:
     name: Test / cli

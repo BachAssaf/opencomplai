@@ -2,9 +2,10 @@
 Unit tests for the Vercel mount-prefix stripping used by every
 api/*/[...path].py Python entry point (finding 48.12).
 
-Not part of the default `testpaths` in pyproject.toml (that's scoped to
-packages/ and services/), so run explicitly:
-    .venv/bin/python -m pytest api/_shared/test_mount_prefix.py -q
+Runs in CI as an explicit step of the test-core job (ci-python.yml) —
+`api` is in pyproject.toml's testpaths too, but every CI job invokes pytest
+with explicit paths, so testpaths alone wouldn't run this. Locally:
+    uv run pytest api/_shared -q
 
 Loads mount_prefix.py by file path (rather than a bare `import`) because the
 repo's root conftest.py forces `--import-mode=importlib`, which does not add

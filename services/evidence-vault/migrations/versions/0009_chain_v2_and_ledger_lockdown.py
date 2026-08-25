@@ -153,15 +153,30 @@ def _rewrite_chains(hash_event) -> None:
 
     genesis = _sha256("")
     running: dict[str, str] = {}
+    updates: list[dict[str, str]] = []
     for row in rows:
         new_prev = running.get(row.tenant_id, genesis)
         if row.prev_hash != new_prev:
-            bind.execute(
-                sa.update(_ledger_events)
-                .where(_ledger_events.c.event_id == row.event_id)
-                .values(prev_hash=new_prev)
-            )
+            updates.append({"target_event_id": row.event_id, "new_prev_hash": new_prev})
         running[row.tenant_id] = hash_event(row, new_prev)
+
+    if updates:
+        # Effectively every non-genesis row changes (the v1/v2 preimages
+        # differ structurally, so the rolling chain diverges after each
+        # tenant's first event), and this runs inside the entrypoint's
+        # blocking `alembic upgrade head` — one executemany instead of one
+        # round trip per row keeps a large ledger's migration from
+        # stretching deployment downtime. Bind-param names deliberately
+        # differ from the column names: SQLAlchemy auto-generates a
+        # bindparam per .values() column, and reusing "prev_hash" or
+        # "event_id" would collide with the executemany params.
+        stmt = (
+            sa.update(_ledger_events)
+            .where(_ledger_events.c.event_id == sa.bindparam("target_event_id"))
+            .values(prev_hash=sa.bindparam("new_prev_hash"))
+        )
+        bind.execute(stmt, updates)
+
     if bind.dialect.name == "postgresql":
         op.execute("RESET ROLE")
 
@@ -181,6 +196,13 @@ def upgrade() -> None:
 
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
+        # NOTE for future migrations: a later "GRANT ALL ON ALL TABLES IN
+        # SCHEMA public TO ..., evidence_vault_app" (the 0004/0005/0007
+        # idiom) targets every existing table and would silently re-grant
+        # UPDATE/DELETE/TRUNCATE here, reopening the tamper vector this
+        # revoke closes. Use migrations/_privileges.py's
+        # grant_all_tables_preserving_ledger_lockdown instead of the raw
+        # statement — tests/test_migration_privilege_guard.py enforces this.
         op.execute(
             "REVOKE UPDATE, DELETE, TRUNCATE ON ledger_events FROM evidence_vault_app"
         )

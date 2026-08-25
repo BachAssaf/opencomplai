@@ -826,3 +826,80 @@ async def test_migration_0009_upgrades_v1_chains_under_non_utc_session_timezone(
             os.environ.pop("PGTZ", None)
         else:
             os.environ["PGTZ"] = previous_pgtz
+
+
+async def test_migration_0009_downgrade_produces_valid_v1_chain(
+    pg_session_factory, postgres_url
+):
+    """
+    Round-trips real v2 data through 0009's downgrade(): appends events via
+    append_event at head (v2 format), downgrades to 0008 — exercising the
+    downgrade lambda's v1 rewrite against a *populated* table, which no
+    other test does (they all call downgrade before inserting anything) —
+    independently recomputes the expected v1 chain and compares, then
+    re-upgrades and asserts verify_chain accepts the chain as v2 again.
+    """
+    tenant_id = "tenant-downgrade-roundtrip"
+    # set_config(..., true) is transaction-scoped, so each append+commit
+    # unit needs its own freshly-GUC'd session (see
+    # test_second_tenant_can_append_under_rls).
+    for n in range(3):
+        session = await _tenant_session(pg_session_factory, tenant_id)
+        try:
+            await append_event(
+                session, event_type="test", payload={"n": n}, tenant_id=tenant_id
+            )
+            await session.commit()
+        finally:
+            await session.close()
+
+    check = await _tenant_session(pg_session_factory, tenant_id)
+    try:
+        assert await verify_chain(check, tenant_id=tenant_id) is True
+    finally:
+        await check.close()
+
+    sync_url = postgres_url.replace("postgresql+asyncpg://", "postgresql://")
+    cfg = Config(str(_service_root() / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", sync_url)
+    command.downgrade(cfg, "0008")
+
+    admin = pg_session_factory()
+    try:
+        await admin.execute(text("SET ROLE evidence_vault_admin"))
+        rows = (
+            await admin.execute(
+                text(
+                    "SELECT event_id, ts, event_type, payload_hash, prev_hash "
+                    "FROM ledger_events WHERE tenant_id = :tid ORDER BY seq"
+                ),
+                {"tid": tenant_id},
+            )
+        ).fetchall()
+    finally:
+        await admin.close()
+
+    assert len(rows) == 3
+    # Recompute the v1 rolling chain independently: each event's prev_hash
+    # must be the v1 hash of its predecessor's own fields (v1 hashes don't
+    # commit to prev_hash). asyncpg always renders timestamptz in UTC, same
+    # normalization the migration's _hash_ts applies.
+    running = _v1_sha256("")
+    for row in rows:
+        assert row.prev_hash == running
+        running = _v1_sha256(
+            _v1_canonical(
+                row.event_id,
+                row.ts.astimezone(UTC).isoformat(),
+                row.event_type,
+                row.payload_hash,
+            )
+        )
+
+    command.upgrade(cfg, "head")
+
+    session2 = await _tenant_session(pg_session_factory, tenant_id)
+    try:
+        assert await verify_chain(session2, tenant_id=tenant_id) is True
+    finally:
+        await session2.close()

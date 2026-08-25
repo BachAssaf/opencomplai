@@ -78,6 +78,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from opencomplai_cli.exit_codes import HARD_FAIL_EXIT_CODES
+
 RUNNING_IN_GITLAB = os.environ.get("GITLAB_CI") == "true"
 
 # `check --sign` (main.py's check_cmd) always writes its artifact here,
@@ -85,16 +87,11 @@ RUNNING_IN_GITLAB = os.environ.get("GITLAB_CI") == "true"
 # passes cwd= to subprocess.run, so that is this process's own cwd too.
 _ARTIFACT_FILENAME = "compliance-artifact.json"
 
-# FINDING 48.8: mirrors `opencomplai check`'s own exit-code contract
-# (main.py's `_exit_code` / `ScanResult`) -- a `pass` or `degraded_complete`
-# result and any result absent from this table fall through to the
-# generic 0/`returncode` handling below.
-_EXIT_CODE_BY_RESULT: dict[str, int] = {
-    "control_fail": 1,
-    "validation_fail": 2,
-    "policy_block": 3,
-    "trap_detected": 4,
-}
+# FINDING 48.8: `opencomplai check`'s exit-code contract, shared with
+# main.py's `_exit_code` (one source of truth, no hand-copied drift) -- a
+# `pass` or `degraded_complete` result and any result absent from this
+# table fall through to the generic 0/`returncode` handling below.
+_EXIT_CODE_BY_RESULT = HARD_FAIL_EXIT_CODES
 
 
 # ---------------------------------------------------------------------------

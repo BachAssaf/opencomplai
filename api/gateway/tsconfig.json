@@ -1,0 +1,20 @@
+{
+  // Type-checks the Vercel adapter, which lives outside
+  // services/gateway-api's own tsconfig (rootDir: src) and was previously
+  // never seen by any tsc run. No rootDir: TypeScript infers the common
+  // ancestor of the adapter and the gateway sources it imports.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["**/*.test.ts", "node_modules"]
+}

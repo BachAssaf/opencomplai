@@ -13,9 +13,10 @@
  * /api/gateway prefix before injection so those routes match (finding
  * 48.12).
  */
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+import type { InjectOptions } from "../../services/gateway-api/src/index";
 import { buildApp } from "../../services/gateway-api/src/index";
 import { rewriteUrl } from "./_lib/rewriteUrl";
+import type { VercelLikeRequest, VercelLikeResponse } from "./_lib/types";
 
 const GATEWAY_MOUNT_PREFIX = "/api/gateway";
 
@@ -25,8 +26,8 @@ const app = buildApp();
 const ready = app.ready();
 
 export default async function handler(
-  req: VercelRequest,
-  res: VercelResponse,
+  req: VercelLikeRequest,
+  res: VercelLikeResponse,
 ): Promise<void> {
   await ready;
 
@@ -41,7 +42,7 @@ export default async function handler(
   const payload = bodyChunks.length > 0 ? Buffer.concat(bodyChunks) : undefined;
 
   const response = await app.inject({
-    method: method as Parameters<typeof app.inject>[0]["method"],
+    method: method as InjectOptions["method"],
     url,
     headers: req.headers as Record<string, string>,
     payload,

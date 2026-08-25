@@ -38,6 +38,10 @@ jobs:
       # `build` emits to dist/ via tsc; --noEmit runs the same type check
       # without writing build output, per tsconfig.json's compilerOptions.
       - run: pnpm --filter opencomplai-gateway-api exec tsc --noEmit
+      # The Vercel adapter (api/gateway/*) sits outside the package's
+      # tsconfig rootDir and was previously never type-checked by any job.
+      - name: Typecheck Vercel adapter
+        run: pnpm --filter opencomplai-gateway-api exec tsc --noEmit -p ../../api/gateway/tsconfig.json
 
   gateway-api-test:
     name: Test / gateway-api
@@ -116,10 +120,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9
       - uses: actions/setup-node@v6
         with:
-          # Node >=23 runs .ts test files natively (type stripping); the
-          # adapter tests use the stdlib node:test runner with no deps.
           node-version: "24"
-      - name: Run Vercel adapter URL-rewrite tests
-        run: node --test api/gateway/_lib/rewriteUrl.test.ts
+          cache: "pnpm"
+      # handler.test.ts imports the real gateway app (extensionless internal
+      # imports), which Node's native type stripping can't resolve — run the
+      # stdlib node:test files through tsx (already a gateway devDependency).
+      - run: pnpm install --frozen-lockfile
+      - name: Run Vercel adapter tests (URL rewrite + handler)
+        run: pnpm --filter opencomplai-gateway-api exec tsx --test ../../api/gateway/_lib/rewriteUrl.test.ts ../../api/gateway/handler.test.ts
