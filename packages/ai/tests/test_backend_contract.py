@@ -37,7 +37,9 @@ BACKEND_CLASSES = (IntentClassifier, IntentExplainer, SaaSIntentClient)
 def _extract_classify_kwargs() -> set[str]:
     """Statically find every key detector.py's classify_kwargs dict can hold.
 
-    Covers both the dict-literal assignment and the conditional
+    Covers the dict-literal assignment in both its plain (``ast.Assign``) and
+    type-annotated (``ast.AnnAssign`` — ``classify_kwargs: dict = {...}``, the
+    form detector.py actually uses) shapes, plus the conditional
     ``classify_kwargs["gate_reason"] = ...`` subscript assignment, regardless
     of nesting (``ast.walk`` visits the whole tree, including the body of the
     ``if usage:`` block).
@@ -46,18 +48,28 @@ def _extract_classify_kwargs() -> set[str]:
     tree = ast.parse(source)
     keys: set[str] = set()
 
+    def _add_dict_keys(value: ast.expr | None) -> None:
+        if isinstance(value, ast.Dict):
+            for k in value.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    keys.add(k.value)
+
     for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign):
+            # `classify_kwargs: dict = {...}` is an AnnAssign, NOT an Assign
+            # — the original Assign-only walk silently missed the whole dict
+            # literal and only ever found gate_reason via the subscript path.
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "classify_kwargs"
+            ):
+                _add_dict_keys(node.value)
+            continue
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if (
-                isinstance(target, ast.Name)
-                and target.id == "classify_kwargs"
-                and isinstance(node.value, ast.Dict)
-            ):
-                for k in node.value.keys:
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str):
-                        keys.add(k.value)
+            if isinstance(target, ast.Name) and target.id == "classify_kwargs":
+                _add_dict_keys(node.value)
             elif (
                 isinstance(target, ast.Subscript)
                 and isinstance(target.value, ast.Name)
@@ -71,12 +83,27 @@ def _extract_classify_kwargs() -> set[str]:
 
 
 def test_extraction_finds_gate_reason():
-    """Sanity check on the AST extraction itself: if this ever comes back
-    empty (e.g. detector.py's source shape changed so the walk no longer
-    matches), the contract test below would trivially pass on zero keys —
-    catch that here instead of silently losing coverage."""
+    """Sanity check on the AST extraction itself: if it stops seeing keys
+    (e.g. detector.py's source shape changed so the walk no longer matches),
+    the contract test below silently degrades — that already happened once:
+    the dict literal is an AnnAssign, which an Assign-only walk skips, so
+    only gate_reason (a plain subscript Assign) was ever checked. Pin the
+    full expected set, not just non-emptiness."""
     kwargs = _extract_classify_kwargs()
-    assert kwargs, "AST extraction found no classify_kwargs keys in detector.py"
+    expected = {
+        "declared_purpose",
+        "location",
+        "token",
+        "ai_usage_type",
+        "legacy",
+        "gate_reason",
+    }
+    assert kwargs >= expected, (
+        f"AST extraction found {sorted(kwargs)}, expected at least "
+        f"{sorted(expected)} — if detector.py's classify_kwargs shape "
+        "changed, update this set deliberately rather than letting the "
+        "extraction silently lose coverage."
+    )
     assert "gate_reason" in kwargs, (
         "detector.py no longer conditionally sets gate_reason — if that's "
         "intentional, this assertion (and the finding-1 regression it "

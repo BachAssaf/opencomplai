@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -10,6 +11,7 @@ import urllib.request
 from opencomplai_ai.egress import has_consent, is_offline
 from opencomplai_ai.models import (
     IntentAnnotation,
+    apply_subject_gate_backstop,
     derive_eu_obligations,
     derive_risk_tier,
 )
@@ -91,7 +93,9 @@ class SaaSIntentClient:
 
             area = data.get("annex_iii_area")
             if isinstance(area, float):
-                area = int(area) if area == int(area) else None
+                # json.loads accepts bare NaN/Infinity tokens; int() on a
+                # non-finite float raises instead of coercing.
+                area = int(area) if math.isfinite(area) and area == int(area) else None
             if not isinstance(area, int) or area not in range(1, 9):
                 area = None
 
@@ -99,15 +103,15 @@ class SaaSIntentClient:
             subject = data.get("subject_type", "unknown")
             consequential = data.get("consequential", "unknown")
 
-            # Backstop: don't trust the cloud API's area/tier blindly when it
-            # reports a subject_type that contradicts a subject-gated area
-            # (same rationale as the local GGUF backend in explainer.py).
-            if area is not None and subject in ("legal_entity", "system"):
-                from opencomplai_ai.knowledge.annex_iii import lookup_by_area
-
-                entries = lookup_by_area(area)
-                if entries and entries[0].subject_gated:
-                    area = None
+            art5 = bool(data.get("art5_prohibited", False))
+            art6_3 = bool(data.get("art6_3_profiling", False))
+            # Same backstop as the local GGUF backend: art6_3 is only
+            # cleared on a subject-gated conflict, never merely because the
+            # area came back null -- Art. 6(3) profiling applies regardless
+            # of whether a specific Annex III area was also resolved.
+            area, art6_3, _backstop_explanation = apply_subject_gate_backstop(
+                area, subject, art6_3
+            )
 
             obligations = derive_eu_obligations(
                 autonomy,  # type: ignore[arg-type]
@@ -115,8 +119,6 @@ class SaaSIntentClient:
                 consequential,  # type: ignore[arg-type]
                 annex_iii_area=area,
             )
-            art5 = bool(data.get("art5_prohibited", False))
-            art6_3 = bool(data.get("art6_3_profiling", False)) and area is not None
             tier = data.get("risk_tier")
             if area is None and tier == "high_risk":
                 tier = None

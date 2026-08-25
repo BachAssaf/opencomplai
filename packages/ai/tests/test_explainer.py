@@ -63,6 +63,45 @@ def test_parse_annotation_art5_prohibited():
     assert ann.art5_prohibited is True
 
 
+def test_parse_annotation_preserves_art6_3_when_area_is_null():
+    # Characterization: the subject-gate backstop (now shared with the saas
+    # client via apply_subject_gate_backstop) only clears art6_3 on a
+    # subject-gated conflict — a null area on its own never suppresses it.
+    data = {
+        "annex_iii_area": None,
+        "art5_prohibited": False,
+        "art6_3_profiling": True,
+        "decision_autonomy": "autonomous",
+        "subject_type": "natural_person",
+        "consequential": "yes",
+        "risk_tier": "limited_risk",
+        "explanation": "Profiles natural persons; no single area resolved.",
+    }
+    ann = _parse_annotation(data, model_id="qwen2.5-coder", confidence=0.9)
+    assert ann.art6_3_profiling is True
+
+
+def test_parse_annotation_subject_gated_conflict_clears_area_and_art6_3():
+    # Characterization of the backstop's firing case: area 5 is subject-
+    # gated, and the model itself says the subject is a legal entity — both
+    # the area and the profiling flag must be suppressed, same as before
+    # the refactor into apply_subject_gate_backstop.
+    data = {
+        "annex_iii_area": 5,
+        "art5_prohibited": False,
+        "art6_3_profiling": True,
+        "decision_autonomy": "autonomous",
+        "subject_type": "legal_entity",
+        "consequential": "yes",
+        "risk_tier": "high_risk",
+        "explanation": "",
+    }
+    ann = _parse_annotation(data, model_id="qwen2.5-coder", confidence=0.9)
+    assert ann.annex_iii_area is None
+    assert ann.art6_3_profiling is False
+    assert "scoped to natural persons" in (ann.explanation or "")
+
+
 @pytest.mark.parametrize(
     "bad_area",
     [3.5, "five", None, float("nan"), float("inf"), float("-inf")],

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from opencomplai_ai.models import (
     IntentAnnotation,
+    apply_subject_gate_backstop,
     derive_eu_obligations,
     derive_risk_tier,
 )
@@ -161,24 +162,11 @@ def _parse_annotation(data: dict, model_id: str, confidence: float) -> IntentAnn
     explanation = data.get("explanation")
     limited = not art5 and area is None and data.get("risk_tier") == "limited_risk"
 
-    # Defensive backstop: the system prompt instructs the model to leave
-    # annex_iii_area null when the scored subject isn't a natural person,
-    # but LLM output is probabilistic and can be self-inconsistent (area set
-    # + subject_type correctly "legal_entity"/"system" in the same response).
-    # Cross-check against the pack's subject_gated flag rather than trusting
-    # area and subject_type to already agree.
-    if area is not None and subject in ("legal_entity", "system"):
-        from opencomplai_ai.knowledge.annex_iii import lookup_by_area
-
-        entries = lookup_by_area(area)
-        if entries and entries[0].subject_gated:
-            area = None
-            art6_3 = False
-            if not explanation:
-                explanation = (
-                    "Annex III area suppressed: model reported subject_type="
-                    f"{subject}, and this area is scoped to natural persons."
-                )
+    area, art6_3, backstop_explanation = apply_subject_gate_backstop(
+        area, subject, art6_3
+    )
+    if backstop_explanation and not explanation:
+        explanation = backstop_explanation
 
     obligations = derive_eu_obligations(
         autonomy,  # type: ignore[arg-type]

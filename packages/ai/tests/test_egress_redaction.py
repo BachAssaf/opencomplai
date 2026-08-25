@@ -263,6 +263,51 @@ def test_snippet_is_redacted_before_it_reaches_the_request_body(monkeypatch) -> 
     assert "alice@example.com" not in body["declared_purpose"]
 
 
+class _FakeResponse:
+    """Minimal stand-in for urllib.request.urlopen's context-manager result."""
+
+    def __init__(self, payload: dict) -> None:
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_art6_3_profiling_preserved_when_area_is_null(monkeypatch) -> None:
+    """art6_3 must only be cleared by the subject-gated-conflict backstop
+    (area resolved AND subject legal_entity/system AND that area is
+    subject_gated) — exactly like explainer._parse_annotation — never merely
+    because area came back null. Art. 6(3) profiling applies regardless of
+    whether a specific Annex III area was also resolved."""
+    monkeypatch.setenv("OPENCOMPLAI_API_KEY", "key")
+    monkeypatch.delenv("OPENCOMPLAI_OFFLINE", raising=False)
+    monkeypatch.setattr("opencomplai_ai._saas_client.has_consent", lambda: True)
+    payload = {
+        "annex_iii_area": None,
+        "art5_prohibited": False,
+        "art6_3_profiling": True,
+        "decision_autonomy": "autonomous",
+        "subject_type": "natural_person",
+        "consequential": "yes",
+        "risk_tier": "limited_risk",
+        "explanation": "profiles natural persons; no single Annex III area resolved",
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda req, timeout=None: _FakeResponse(payload)
+    )
+
+    result = SaaSIntentClient().classify("code")
+
+    assert result is not None
+    assert result.art6_3_profiling is True
+
+
 # --------------------------------------------------------------------------
 # Model artifact integrity
 # --------------------------------------------------------------------------
@@ -381,9 +426,7 @@ def test_download_under_offline_mode_raises_before_prompting(
         downloader.ensure_model("pinned")
 
 
-def test_non_interactive_download_does_not_block_forever(
-    tmp_path, monkeypatch
-) -> None:
+def test_non_interactive_download_does_not_block_forever(tmp_path, monkeypatch) -> None:
     """
     The prompt used to call console.input() unconditionally, which blocks
     forever on a non-interactive stdin (the documented suite-hang hazard).

@@ -270,6 +270,40 @@ def derive_eu_obligations(
     return ["Art.52 disclosure if user-facing"]
 
 
+def apply_subject_gate_backstop(
+    area: int | None, subject: str, art6_3_profiling: bool
+) -> tuple[int | None, bool, str | None]:
+    """Defensive backstop shared by the local GGUF backend
+    (explainer._parse_annotation) and the cloud backend
+    (_saas_client.SaaSIntentClient.classify).
+
+    The system prompt instructs the model to leave annex_iii_area null when
+    the scored subject isn't a natural person, but LLM output is
+    probabilistic and can be self-inconsistent (area set + subject_type
+    correctly "legal_entity"/"system" in the same response). Cross-check
+    against the pack's subject_gated flag rather than trusting area and
+    subject_type to already agree. art6_3_profiling is only cleared when
+    this conflict fires — Art. 6(3) profiling applies regardless of whether
+    a specific Annex III area was also resolved, so a null area on its own
+    must never suppress the flag.
+
+    Returns (area, art6_3_profiling, explanation_override); the override is
+    None unless the backstop fired.
+    """
+    if area is not None and subject in ("legal_entity", "system"):
+        from opencomplai_ai.knowledge.annex_iii import lookup_by_area
+
+        entries = lookup_by_area(area)
+        if entries and entries[0].subject_gated:
+            return (
+                None,
+                False,
+                "Annex III area suppressed: model reported subject_type="
+                f"{subject}, and this area is scoped to natural persons.",
+            )
+    return area, art6_3_profiling, None
+
+
 def derive_risk_tier(
     *,
     art5_prohibited: bool = False,
