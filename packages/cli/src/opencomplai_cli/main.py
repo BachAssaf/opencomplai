@@ -3871,9 +3871,20 @@ def _preload_ai_model(model_id: str | None) -> bool:
     """
     try:
         from opencomplai_ai.config import get_active_model
-        from opencomplai_ai.downloader import ensure_model
+        from opencomplai_ai.models import MODEL_CATALOG
 
         resolved = model_id or get_active_model()
+        spec = MODEL_CATALOG.get(resolved)
+        if spec is not None and not spec.needs_preload:
+            # codebert-onnx and saas classify with no local artifact at all;
+            # calling ensure_model here routed codebert-onnx into the
+            # separate, optional ONNX-export path — an interactive ~440 MB
+            # download prompt (or, non-interactively, a RuntimeError that
+            # silently disabled --ai-intent) for a backend that needs zero
+            # setup.
+            return True
+        from opencomplai_ai.downloader import ensure_model
+
         ensure_model(resolved)
         return True
     except ImportError:

@@ -78,6 +78,21 @@ class TestGenuineHighRiskStillFlagged:
         )
         assert result.passed is False
 
+    def test_asylum_seeker_use_case_is_not_gated_away_from_migration_area(self):
+        """NATURAL_PERSON_CUES used to hold the compound token
+        "asylum_seeker", which prose ("asylum seekers") can never produce
+        after tokenization — so an asylum/migration use case that also
+        contained a product/entity cue ("device") was subject-gated away as
+        if it scored something other than a natural person, and Annex III
+        7(b) silently passed."""
+        result = AnnexIIIClassifierRule().evaluate(
+            _input(
+                "entry risk assessment device flags asylum seekers for "
+                "extra screening at the border"
+            )
+        )
+        assert result.passed is False
+
     def test_facial_recognition_access_control_is_high_risk(self):
         result = AnnexIIIClassifierRule().evaluate(
             _input("real-time facial recognition system for access control")

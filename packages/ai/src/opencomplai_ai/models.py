@@ -97,6 +97,15 @@ class ModelSpec:
     #: modification of the cached file go unnoticed forever. Empty means
     #: unverified.
     sha256: str = ""
+    #: False for backends that classify() without any local artifact or
+    #: setup step: codebert-onnx (a deterministic code-signal matcher — see
+    #: classifier.IntentClassifier) and saas (a cloud API client). The
+    #: registry never calls ensure_model for either at classification time,
+    #: so the CLI's pre-scan preload must not either — for codebert-onnx it
+    #: routed into the separate, optional ONNX-export path, which prompts
+    #: for a ~440 MB download (or raises in non-interactive runs, silently
+    #: disabling --ai-intent) even though the backend needs zero setup.
+    needs_preload: bool = True
 
 
 MODEL_CATALOG: dict[str, ModelSpec] = {
@@ -116,6 +125,7 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         hf_repo="microsoft/codebert-base",
         filename="codebert-base-onnx.tar.gz",
         requires_deep=False,
+        needs_preload=False,
     ),
     "qwen2.5-coder-0.5b": ModelSpec(
         model_id="qwen2.5-coder-0.5b",
@@ -176,6 +186,7 @@ MODEL_CATALOG: dict[str, ModelSpec] = {
         hf_repo="",
         filename="",
         requires_deep=False,
+        needs_preload=False,
     ),
 }
 

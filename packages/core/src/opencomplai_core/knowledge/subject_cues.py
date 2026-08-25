@@ -54,7 +54,11 @@ NATURAL_PERSON_CUES: frozenset[str] = frozenset(
         "offender",
         "suspect",
         "migrant",
-        "asylum_seeker",
+        # Single tokens only: both consumers split on whitespace or
+        # non-alphanumerics, so a compound like "asylum_seeker" can never
+        # match prose ("asylum seekers" tokenizes to two separate words).
+        "asylum",
+        "refugee",
         "traveler",
         "victim",
     }
