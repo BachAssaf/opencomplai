@@ -387,46 +387,52 @@ async def test_second_tenant_can_append_under_rls(pg_session_factory):
     # only (like SET LOCAL) — it does not survive a commit. Each append+commit
     # unit therefore needs its own freshly-GUC'd session, exactly as a real
     # request handler would open one per request.
-    for n in range(3):
-        session_a = await _tenant_session(pg_session_factory, "tenant-a")
+    try:
+        for n in range(3):
+            session_a = await _tenant_session(pg_session_factory, "tenant-a")
+            try:
+                await append_event(
+                    session_a, event_type="test", payload={"n": n}, tenant_id="tenant-a"
+                )
+                await session_a.commit()
+            finally:
+                await session_a.close()
+
+        session_b = await _tenant_session(pg_session_factory, "tenant-b")
         try:
+            # Before the fix, this raised IntegrityError after 5 retries.
             await append_event(
-                session_a, event_type="test", payload={"n": n}, tenant_id="tenant-a"
+                session_b, event_type="test", payload={"n": 0}, tenant_id="tenant-b"
             )
-            await session_a.commit()
+            await session_b.commit()
+
+            assert await verify_chain(session_b, tenant_id="tenant-b") is True
         finally:
-            await session_a.close()
+            await session_b.close()
 
-    session_b = await _tenant_session(pg_session_factory, "tenant-b")
-    try:
-        # Before the fix, this raised IntegrityError after 5 retries.
-        await append_event(
-            session_b, event_type="test", payload={"n": 0}, tenant_id="tenant-b"
+        session_a_check = await _tenant_session(pg_session_factory, "tenant-a")
+        try:
+            assert await verify_chain(session_a_check, tenant_id="tenant-a") is True
+        finally:
+            await session_a_check.close()
+    finally:
+        # Cleanup: tenant-a and tenant-b intentionally hold colliding seq
+        # values (that's the whole point of the fix), which migration 0008's
+        # downgrade() cannot re-index (see its docstring) since it briefly
+        # reinstates a globally-unique index on seq. Leaving this data behind
+        # would break the next test's fixture, which downgrades to "base"
+        # before every test — so the cleanup must run even when an assertion
+        # above fails, or one genuine failure here cascades into a confusing
+        # migration crash in an unrelated test's setup.
+        admin = pg_session_factory()
+        await admin.execute(text("SET ROLE evidence_vault_admin"))
+        await admin.execute(
+            text(
+                "DELETE FROM ledger_events WHERE tenant_id IN ('tenant-a', 'tenant-b')"
+            )
         )
-        await session_b.commit()
-
-        assert await verify_chain(session_b, tenant_id="tenant-b") is True
-    finally:
-        await session_b.close()
-
-    session_a_check = await _tenant_session(pg_session_factory, "tenant-a")
-    try:
-        assert await verify_chain(session_a_check, tenant_id="tenant-a") is True
-    finally:
-        await session_a_check.close()
-
-    # Cleanup: tenant-a and tenant-b intentionally hold colliding seq values
-    # (that's the whole point of the fix), which migration 0008's downgrade()
-    # cannot re-index (see its docstring) since it briefly reinstates a
-    # globally-unique index on seq. Leaving this data behind would break the
-    # next test's fixture, which downgrades to "base" before every test.
-    admin = pg_session_factory()
-    await admin.execute(text("SET ROLE evidence_vault_admin"))
-    await admin.execute(
-        text("DELETE FROM ledger_events WHERE tenant_id IN ('tenant-a', 'tenant-b')")
-    )
-    await admin.commit()
-    await admin.close()
+        await admin.commit()
+        await admin.close()
 
 
 async def test_concurrent_same_tenant_appends_keep_chain_valid(pg_session_factory):
@@ -556,9 +562,12 @@ async def test_app_role_cannot_rewrite_ledger(pg_session_factory):
     Pins migration 0009's REVOKE UPDATE, DELETE, TRUNCATE ON ledger_events
     FROM evidence_vault_app: the request-facing role only ever INSERTs and
     SELECTs ledger rows, so a request handler compromised into issuing an
-    UPDATE/DELETE against the append-only ledger must fail at the privilege
-    layer, not merely be inconvenienced by RLS. Uses a fresh session per
-    attempt because a failed statement poisons the enclosing transaction.
+    UPDATE/DELETE/TRUNCATE against the append-only ledger must fail at the
+    privilege layer, not merely be inconvenienced by RLS — TRUNCATE in
+    particular bypasses RLS entirely, so the privilege layer is the only
+    thing standing between the app role and a one-statement wipe of every
+    tenant's chain. Uses a fresh session per attempt because a failed
+    statement poisons the enclosing transaction.
     """
     tenant_id = "tenant-lockdown"
 
@@ -600,6 +609,65 @@ async def test_app_role_cannot_rewrite_ledger(pg_session_factory):
     finally:
         await delete_session.rollback()
         await delete_session.close()
+
+    # TRUNCATE bypasses RLS entirely (no per-row policy is ever evaluated),
+    # so no tenant filter is meaningful here — only the REVOKE stands
+    # between the app role and wiping every tenant's chain in one statement.
+    truncate_session = await _tenant_session(pg_session_factory, tenant_id)
+    try:
+        with pytest.raises(ProgrammingError) as truncate_exc:
+            await truncate_session.execute(text("TRUNCATE ledger_events"))
+        assert isinstance(truncate_exc.value.orig.__cause__, InsufficientPrivilegeError)
+    finally:
+        await truncate_session.rollback()
+        await truncate_session.close()
+
+
+async def test_tenant_session_role_does_not_leak_to_pooled_connection(
+    pg_session_factory, postgres_url
+):
+    """
+    get_tenant_session's SET ROLE is session-level and survives COMMIT
+    (unlike the tenant GUC, whose set_config third argument scopes it to the
+    transaction), and SQLAlchemy's pool checkin only issues a ROLLBACK — so
+    without an explicit RESET ROLE in the dependency's finally, the
+    restricted evidence_vault_app role stayed attached to the pooled
+    physical connection and leaked into whichever request reused it next
+    (e.g. anything using the plain sessionmaker, like /ready).
+
+    pool_size=1/max_overflow=0 forces the second session below onto the
+    exact physical connection the first one released. pg_session_factory is
+    depended on only to ensure migrations (and the roles) exist.
+    """
+    from types import SimpleNamespace
+
+    from opencomplai_evidence_vault.main import get_tenant_session
+
+    engine = create_async_engine(postgres_url, pool_size=1, max_overflow=0)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    fake_request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(sessionmaker=sessionmaker))
+    )
+
+    try:
+        gen = get_tenant_session(fake_request, tenant_id="tenant-leak-check")
+        session = await gen.__anext__()
+        user = (await session.execute(text("SELECT current_user"))).scalar_one()
+        assert user == "evidence_vault_app"
+        await session.commit()  # a committed SET ROLE is what leaks
+        with pytest.raises(StopAsyncIteration):
+            await gen.__anext__()  # drives the dependency's finally block
+
+        check_session = sessionmaker()
+        try:
+            user = (
+                await check_session.execute(text("SELECT current_user"))
+            ).scalar_one()
+            assert user != "evidence_vault_app"
+        finally:
+            await check_session.close()
+    finally:
+        await engine.dispose()
 
 
 def _v1_canonical(

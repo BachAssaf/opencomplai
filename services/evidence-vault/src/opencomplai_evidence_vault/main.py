@@ -181,13 +181,41 @@ async def get_tenant_session(
     """
     async_session: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     async with async_session() as session:
-        if session.bind is not None and session.bind.dialect.name == "postgresql":
+        is_postgres = (
+            session.bind is not None and session.bind.dialect.name == "postgresql"
+        )
+        if is_postgres:
             await session.execute(text("SET ROLE evidence_vault_app"))
             await session.execute(
                 text("SELECT set_config('app.tenant_id', :tid, true)"),
                 {"tid": tenant_id},
             )
-        yield session
+        try:
+            yield session
+        finally:
+            if is_postgres:
+                # SET ROLE (unlike the tenant GUC above, whose set_config
+                # third argument scopes it to the transaction) is
+                # session-level and survives COMMIT, and the pool's checkin
+                # only issues a ROLLBACK — without an explicit reset the
+                # restricted evidence_vault_app role leaks onto whichever
+                # request next reuses this pooled physical connection,
+                # including ones (plain sessionmaker() users like /ready)
+                # that expect the connection's real default role.
+                #
+                # Roll back first: if the route raised mid-transaction,
+                # Postgres rejects every statement except ROLLBACK/COMMIT
+                # in the aborted-transaction state, and RESET ROLE would
+                # mask the route's real exception with a new error.
+                if session.in_transaction():
+                    await session.rollback()
+                await session.execute(text("RESET ROLE"))
+                # RESET ROLE is itself transactional: executing it starts a
+                # fresh (autobegin) transaction, and the session close that
+                # follows this generator rolls that transaction back —
+                # silently undoing the reset. Commit to make it stick on
+                # the physical connection before it returns to the pool.
+                await session.commit()
 
 
 class AppendEventRequest(BaseModel):
