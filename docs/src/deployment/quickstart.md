@@ -48,6 +48,25 @@ See [Configuration](configuration.md) for the full env-var reference.
     docker compose -f infra/compose/docker-compose.yml up --build -d
     ```
 
+## Database migrations
+
+evidence-vault runs its Alembic migrations automatically at container boot,
+before it starts serving traffic — the container's entrypoint runs `alembic
+upgrade head` against `DATABASE_URL` and refuses to start (non-zero exit,
+container stays unhealthy) if that fails, rather than serving requests
+against an unmigrated database. `docker compose up` needs no separate
+migration step.
+
+To skip this (e.g. you run migrations yourself as a separate step), set
+`EVIDENCE_VAULT_SKIP_MIGRATIONS=1` in `infra/compose/.env` for the
+evidence-vault service. To run migrations manually instead, see
+[infra/migrations/README.md](https://github.com/Opencomplai/opencomplai/blob/main/infra/migrations/README.md):
+
+```bash
+cd services/evidence-vault
+DATABASE_URL=postgresql://<user>:<password>@localhost:5432/<db> alembic upgrade head
+```
+
 ## Verify all services are healthy
 
 === "macOS / Linux"

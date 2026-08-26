@@ -1,0 +1,7 @@
+{
+  "system_id": "trap-fixture-system",
+  "intended_purpose": "Automated resume screening for job applicants",
+  "compliance_target": "EU_AI_ACT",
+  "high_risk_presumption": false,
+  "commit_ref": "ci-fixture"
+}

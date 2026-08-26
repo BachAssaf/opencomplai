@@ -19,6 +19,12 @@ Documentation = "https://docs.opencomplai.com"
 
 [project.scripts]
 opencomplai = "opencomplai_cli.main:app"
+# The CI connectors' own docstrings and docs/src/guides/ci-integration.md
+# instruct users to run these commands; without the entry points a
+# documented `pip install opencomplai` + `run: opencomplai-gha-connector`
+# job dies with "command not found" before any exit-code logic executes.
+opencomplai-gha-connector = "opencomplai_cli.connectors.github_actions:main"
+opencomplai-gitlab-connector = "opencomplai_cli.connectors.gitlab_ci:main"
 
 [project.optional-dependencies]
 dev = [

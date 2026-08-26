@@ -49,13 +49,13 @@ Use the helper script bundled with the repository:
 
 === "macOS / Linux"
     ```bash
-    ./scripts/verify-sbom.sh ghcr.io/opencomplai/opencomplai/gateway-api:1.0.0
+    ./sync/verify-sbom.sh ghcr.io/opencomplai/opencomplai/gateway-api:1.0.0
     ```
 
 === "Windows (PowerShell)"
     ```powershell
     # Bash script — run via WSL2 or Git Bash
-    ./scripts/verify-sbom.sh ghcr.io/opencomplai/opencomplai/gateway-api:1.0.0
+    ./sync/verify-sbom.sh ghcr.io/opencomplai/opencomplai/gateway-api:1.0.0
     ```
 
 It runs both `cosign verify` and `cosign verify-attestation` and decodes the

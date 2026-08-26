@@ -48,17 +48,17 @@ This is the **default** for a fresh installation.
 
 ## Supply chain
 
-SBOM generation is automated in `scripts/verify-sbom.sh`. Run it to verify the supply-chain integrity of all installed packages.
+SBOM generation is automated in `sync/verify-sbom.sh`. Run it to verify the supply-chain integrity of all installed packages.
 
 === "macOS / Linux"
     ```bash
-    ./scripts/verify-sbom.sh
+    ./sync/verify-sbom.sh
     ```
 
 === "Windows (PowerShell)"
     ```powershell
     # Bash-only script — use WSL2 or Git Bash on Windows
-    ./scripts/verify-sbom.sh
+    ./sync/verify-sbom.sh
     ```
 
 See [Supply Chain](../security/supply-chain.md) for the full supply-chain security model.

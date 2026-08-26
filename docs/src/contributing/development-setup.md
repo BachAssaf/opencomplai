@@ -5,7 +5,7 @@ Set up Opencomplai for local development. The project is a Python monorepo manag
 !!! note "Windows developers"
     Development setup is primarily tested on macOS/Linux. Windows support via
     WSL2 is recommended for the full dev workflow (especially `bootstrap.sh` and
-    shell scripts under `scripts/`).
+    shell scripts under `sync/`).
 
 ## Prerequisites
 
@@ -37,18 +37,18 @@ Set up Opencomplai for local development. The project is a Python monorepo manag
 
 === "macOS / Linux"
     ```bash
-    ./scripts/bootstrap.sh
+    ./sync/bootstrap.sh
     ```
 
 === "Windows (PowerShell)"
     ```powershell
     # Bash-only script — use WSL2 or Git Bash, or follow manual setup below
-    ./scripts/bootstrap.sh
+    ./sync/bootstrap.sh
     ```
 
 This script:
 
-1. Verifies tool versions (`scripts/doctor.py`).
+1. Verifies tool versions (`sync/doctor.py`).
 2. Creates `uv` virtual environments and installs all Python packages in editable mode.
 3. Installs Node.js dependencies with `pnpm`.
 4. Installs `pre-commit` hooks.
@@ -204,8 +204,8 @@ opencomplai/
 │   ├── compose/           # Docker Compose + .env.example
 │   └── migrations/        # Alembic migrations
 ├── docs/                  # MkDocs documentation
-├── scripts/               # bootstrap.sh, doctor.py
-└── .github/workflows/     # CI (ci-python.yml, ci-node.yml, ci-docker.yml)
+├── sync/                  # bootstrap.sh, doctor.py
+└── .github/workflows/     # CI (ci-python.yml, ci-node.yml)
 ```
 
 ## Troubleshooting

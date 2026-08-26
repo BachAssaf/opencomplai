@@ -51,6 +51,9 @@ jobs:
           python-version: "3.11"
       - run: uv sync --all-packages
       - run: uv run pytest packages/core -v --tb=short
+      # The Vercel mount-prefix tests are stdlib-only; every job invokes
+      # pytest with explicit paths, so testpaths alone never runs them.
+      - run: uv run pytest api/_shared -v --tb=short
 
   test-cli:
     name: Test / cli
@@ -96,8 +99,8 @@ jobs:
       - run: uv sync --all-packages
       - run: uv run pytest packages/sdk-python -v --tb=short
 
-  test-services:
-    name: Test / Python services
+  test-ai:
+    name: Test / ai
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -116,7 +119,52 @@ jobs:
         with:
           python-version: "3.11"
       - run: uv sync --all-packages
-      - run: uv run pytest services/risk-engine services/evidence-vault services/doc-generator services/egress-proxy -v --tb=short
+      - run: uv run pytest packages/ai -v --tb=short
+
+  test-services:
+    name: Test / Python services
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: opencomplai
+          POSTGRES_PASSWORD: opencomplai_test
+          POSTGRES_DB: opencomplai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # evidence-vault's Postgres RLS suite (test_rls_postgres.py) skips
+      # itself when this is unset; asyncpg driver, matches conftest's
+      # postgresql+asyncpg:// -> postgresql:// rewrite for the sync
+      # alembic engine.
+      EVIDENCE_VAULT_POSTGRES_URL: postgresql+asyncpg://opencomplai:opencomplai_test@localhost:5432/opencomplai_test
+      # migrations/env.py's _get_database_url() requires this for the
+      # alembic upgrade/downgrade the RLS fixture runs (sync driver).
+      DATABASE_URL: postgresql://opencomplai:opencomplai_test@localhost:5432/opencomplai_test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: docs/checker-widget/package-lock.json
+      - name: Build checker-local.html
+        run: |
+          cd docs/checker-widget
+          npm ci
+          node build.mjs
+          test -f ../../packages/cli/src/opencomplai_cli/data/checker-local.html
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - run: uv sync --all-packages
+      - run: uv run pytest services/risk-engine services/evidence-vault services/doc-generator services/egress-proxy tools/verify-ledger -v --tb=short
 
   cli-check:
     name: CLI / compliance check (local engine)
@@ -161,20 +209,19 @@ jobs:
           retention-days: 90
       - name: Run compliance check (trap path, expect exit 4)
         run: |
-          cat > /tmp/trap-manifest.json << 'EOF'
-          {
-            "system_id": "ci-trap-test",
-            "intended_purpose": "employment screening and ranking",
-            "compliance_target": "EU_AI_ACT",
-            "high_risk_presumption": false,
-            "commit_ref": "HEAD"
-          }
-          EOF
+          set +e
           uv run opencomplai check \
-            --manifest /tmp/trap-manifest.json \
+            --manifest packages/cli/tests/fixtures/trap/trap-manifest.json \
             --commit-ref "${{ github.sha }}" \
             --scan-mode ci \
-            --output json || true
+            --output json \
+            --change-context model_retrain
+          EXIT_CODE=$?
+          echo "Trap check exited with code $EXIT_CODE (expected 4 -- TRAP_DETECTED)"
+          if [ "$EXIT_CODE" -ne 4 ]; then
+            echo "FAIL: EU_AIA_ART25_MODIFICATION_TRAP did not fire as expected (got exit $EXIT_CODE, want 4)"
+            exit 1
+          fi
 
   egress-dlp:
     name: DLP / egress-proxy allowlist
@@ -238,27 +285,156 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Scan pyproject.toml files for unapproved AI/LLM packages
+      - name: Write AI package gate script
         run: |
-          FORBIDDEN="openai anthropic transformers torch tensorflow langchain llm sentence-transformers diffusers accelerate"
-          INVENTORY="docs/security/ai-inventory.md"
-          FOUND=0
-          for pkg in $FORBIDDEN; do
-            matches=$(grep -rn "\"$pkg\"\\|'$pkg'" --include="pyproject.toml" . || true)
-            if [ -n "$matches" ]; then
-              # Check if this package is in the approved inventory
-              if ! grep -q "$pkg" "$INVENTORY" 2>/dev/null; then
-                echo "FAIL: Unapproved AI/LLM package found: $pkg"
-                echo "$matches"
-                FOUND=1
-              else
-                echo "OK: $pkg found but listed in ai-inventory.md"
-              fi
+          cat > "$RUNNER_TEMP/ai_package_gate.sh" << 'GATE_SCRIPT'
+          #!/usr/bin/env bash
+          # ai_package_gate.sh <repo-root>
+          #
+          # Scans pyproject.toml, package.json, and requirements*.txt files under
+          # <repo-root> for AI/LLM package names that are not explicitly approved in
+          # docs/security/ai-inventory.md's "Approved AI Dependencies" table.
+          #
+          # Exit 0: no unapproved packages found.
+          # Exit 1: at least one unapproved package found.
+          set -euo pipefail
+
+          ROOT="${1:-.}"
+          INVENTORY="$ROOT/docs/security/ai-inventory.md"
+
+          FORBIDDEN="openai anthropic transformers torch tensorflow langchain llm sentence-transformers diffusers accelerate onnxruntime huggingface-hub llama-cpp-python"
+
+          # Extract ONLY the "Approved AI Dependencies" table section (stops at the
+          # next level-2 heading, or EOF) so a mere mention elsewhere in the doc (the
+          # "Found" table, prose, References) never counts as approval.
+          approved_section() {
+            if [ -f "$INVENTORY" ]; then
+              awk '
+                /^## Approved AI Dependencies/ { capture=1; next }
+                /^## / { if (capture) exit }
+                capture { print }
+              ' "$INVENTORY"
             fi
-          done
+          }
+
+          APPROVED="$(approved_section)"
+
+          is_approved() {
+            local pkg="$1"
+            printf '%s\n' "$APPROVED" | grep -Fq "\`$pkg\`"
+          }
+
+          # Matches a quoted package token (TOML/JSON) followed immediately by: an
+          # extras bracket, a version-specifier/separator character, whitespace, or
+          # the closing quote itself -- never a mere name-prefix (e.g. "openai" must
+          # not match a real "openai-agents" package).
+          quoted_tail_regex() {
+            local pkg="$1"
+            local qc='["'"'"']'
+            echo "${qc}${pkg}(\\[|[><=~!;, ]|${qc}|\$)"
+          }
+
+          # Matches a bare package token at the start of a requirements.txt line
+          # (no surrounding quotes there), followed by the same set of terminators.
+          bare_tail_regex() {
+            local pkg="$1"
+            echo "^[[:space:]]*${pkg}(\\[|[><=~!; ]|\$)"
+          }
+
+          FOUND=0
+
+          report() {
+            local pkg="$1" file="$2" matches="$3"
+            if is_approved "$pkg"; then
+              echo "OK: $pkg found in $file but listed in the Approved AI Dependencies table"
+            else
+              echo "FAIL: Unapproved AI/LLM package found: $pkg ($file)"
+              echo "$matches"
+              FOUND=1
+            fi
+          }
+
+          scan_quoted() {
+            local file="$1"
+            for pkg in $FORBIDDEN; do
+              local regex matches
+              regex="$(quoted_tail_regex "$pkg")"
+              matches="$(grep -nE "$regex" "$file" 2>/dev/null || true)"
+              if [ -n "$matches" ]; then
+                report "$pkg" "$file" "$matches"
+              fi
+            done
+          }
+
+          scan_bare() {
+            local file="$1"
+            for pkg in $FORBIDDEN; do
+              local regex matches
+              regex="$(bare_tail_regex "$pkg")"
+              matches="$(grep -nE "$regex" "$file" 2>/dev/null || true)"
+              if [ -n "$matches" ]; then
+                report "$pkg" "$file" "$matches"
+              fi
+            done
+          }
+
+          # Fixture/example paths deliberately contain "bad" AI packages as sample
+          # data for opencomplai's own EU-AI-Act scanning engine to detect -- they
+          # describe a *scanned target*, not a manifest opencomplai itself ships, so
+          # they are out of scope for this gate (same reasoning excludes vendored and
+          # build-output trees).
+          EXCLUDE_ARGS=(
+            -not -path "*/node_modules/*"
+            -not -path "*/.venv/*"
+            -not -path "*/dist/*"
+            -not -path "*/tests/*"
+            -not -path "*/examples/*"
+            -not -path "*/fixtures/*"
+          )
+
+          while IFS= read -r -d '' f; do
+            scan_quoted "$f"
+          done < <(find "$ROOT" \( -name "pyproject.toml" -o -name "package.json" \) \
+            "${EXCLUDE_ARGS[@]}" -print0)
+
+          while IFS= read -r -d '' f; do
+            scan_bare "$f"
+          done < <(find "$ROOT" -name "requirements*.txt" "${EXCLUDE_ARGS[@]}" -print0)
+
           if [ "$FOUND" -eq 1 ]; then
             echo ""
-            echo "To approve a new AI dependency, add it to $INVENTORY and get CISO sign-off."
+            echo "To approve a new AI dependency, add it to the Approved AI Dependencies"
+            echo "table in $INVENTORY and get CISO/maintainer sign-off."
             exit 1
           fi
-          echo "AI package gate passed — no unapproved AI/LLM dependencies found."
+
+          echo "AI package gate passed -- no unapproved AI/LLM dependencies found."
+          exit 0
+          GATE_SCRIPT
+          chmod +x "$RUNNER_TEMP/ai_package_gate.sh"
+
+      - name: Self-test -- gate must detect a known-bad AI/LLM dependency
+        run: |
+          SANDBOX="$RUNNER_TEMP/ai-gate-selftest"
+          rm -rf "$SANDBOX"
+          mkdir -p "$SANDBOX/docs/security"
+          cp docs/security/ai-inventory.md "$SANDBOX/docs/security/ai-inventory.md"
+          cat > "$SANDBOX/pyproject.toml" << 'BAD_PYPROJECT'
+          [project]
+          name = "self-test-fixture"
+          dependencies = [
+              "torch>=2.0",
+          ]
+          BAD_PYPROJECT
+          set +e
+          "$RUNNER_TEMP/ai_package_gate.sh" "$SANDBOX"
+          SELF_TEST_EXIT=$?
+          set -e
+          if [ "$SELF_TEST_EXIT" -ne 1 ]; then
+            echo "FAIL: gate self-test did not detect the injected unapproved 'torch' dependency (exit $SELF_TEST_EXIT, want 1) -- the gate has gone vacuous"
+            exit 1
+          fi
+          echo "Gate self-test OK: unapproved dependency correctly detected (exit 1)"
+
+      - name: Scan repo for unapproved AI/LLM packages
+        run: $RUNNER_TEMP/ai_package_gate.sh .

@@ -3,9 +3,9 @@
 Seed demo data into a running OpenComplAI stack.
 
 Usage:
-    python scripts/seed_demo.py                # idempotent — safe to re-run
-    python scripts/seed_demo.py --dry-run      # print what would be sent; touch nothing
-    python scripts/seed_demo.py --gateway http://localhost:9000  # custom gateway URL
+    python sync/seed_demo.py                # idempotent — safe to re-run
+    python sync/seed_demo.py --dry-run      # print what would be sent; touch nothing
+    python sync/seed_demo.py --gateway http://localhost:9000  # custom gateway URL
 
 All demo records carry system_id prefixed with 'demo-' so reset_demo.py
 can target-delete them without touching production data.

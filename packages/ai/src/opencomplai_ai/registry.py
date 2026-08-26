@@ -7,11 +7,13 @@ from typing import ClassVar
 from opencomplai_ai._saas_client import SaaSIntentClient
 from opencomplai_ai.classifier import IntentClassifier
 from opencomplai_ai.explainer import IntentExplainer
-from opencomplai_ai.models import MODEL_CATALOG, IntentAnnotation
+from opencomplai_ai.models import (
+    MODEL_CATALOG,
+    IntentAnnotation,
+    ModelNotInstalledError,
+)
 
-
-class ModelNotInstalledError(RuntimeError):
-    pass
+__all__ = ["ModelNotInstalledError", "ModelRegistry"]
 
 
 class _IntentBackendProtocol:

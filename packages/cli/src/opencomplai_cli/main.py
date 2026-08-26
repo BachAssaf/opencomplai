@@ -84,6 +84,7 @@ from opencomplai_cli import (
     SUITE_PACKAGES,
     __version__,
 )
+from opencomplai_cli.exit_codes import HARD_FAIL_EXIT_CODES
 
 app = typer.Typer(
     name="opencomplai",
@@ -440,9 +441,9 @@ def _sync_controls_to_vault(
 
     try:
         tenant_id = os.environ.get("OPENCOMPLAI_TENANT_ID", "oss-default")
-        existing_items = _vault_request(
-            "GET", f"/v1/controls/{manifest.system_id}"
-        )["items"]
+        existing_items = _vault_request("GET", f"/v1/controls/{manifest.system_id}")[
+            "items"
+        ]
         existing = [ControlInstance.model_validate(item) for item in existing_items]
         derived = derive_controls(
             report, manifest, get_catalog(), existing, tenant_id=tenant_id
@@ -518,16 +519,26 @@ def _sync_controls_to_vault(
 # ---------------------------------------------------------------------------
 
 
-def _result_from_risk(
-    risk_class: str, trap_detected: bool, profiling_detected: bool
-) -> ScanResult:
-    if trap_detected:
-        return ScanResult.TRAP_DETECTED
-    if risk_class == "unacceptable":
-        return ScanResult.POLICY_BLOCK
-    if risk_class in ("high", "limited"):
-        return ScanResult.CONTROL_FAIL
-    return ScanResult.PASS
+# Change-context values that trip the Article 25 substantial-modification
+# trap — kept in lockstep with the identical literal check in the
+# risk-engine service (services/risk-engine/src/opencomplai_risk_engine/
+# main.py, classify_risk) so the local `check` path and the service path
+# agree on what counts as a substantial modification.
+_SUBSTANTIAL_MODIFICATION_CONTEXTS = frozenset(
+    {"model_retrain", "purpose_change", "capability_extension"}
+)
+
+
+def _answers_from_change_context(change_context: str | None) -> dict[str, bool]:
+    """Derive `AssessmentInput.answers` from a `--change-context` value.
+
+    Mirrors the risk-engine's `classify_risk` derivation exactly (FINDING
+    48.2) so a locally-run `check` and a service-backed one trip
+    EU_AIA_ART25_MODIFICATION_TRAP under the same conditions.
+    """
+    if change_context in _SUBSTANTIAL_MODIFICATION_CONTEXTS:
+        return {"substantial_modification": True}
+    return {}
 
 
 def _controls_from_risk(
@@ -585,10 +596,7 @@ def _maybe_halt_system(system_id: str, commit_ref: str, reason: str) -> None:
 def _exit_code(result: ScanResult, scan_mode: str) -> int:
     mapping = {
         ScanResult.PASS: 0,
-        ScanResult.CONTROL_FAIL: 1,
-        ScanResult.VALIDATION_FAIL: 2,
-        ScanResult.POLICY_BLOCK: 3,
-        ScanResult.TRAP_DETECTED: 4,
+        **HARD_FAIL_EXIT_CODES,
         ScanResult.DEGRADED_COMPLETE: 1 if scan_mode == "ci" else 0,
     }
     return mapping.get(result, 1)
@@ -1197,7 +1205,9 @@ def gaps_cmd(
     corroboration_report = None
     if scan_report_file is not None:
         if not scan_report_file.exists():
-            err_console.print(f"[red]Error:[/red] scan report not found: {scan_report_file}")
+            err_console.print(
+                f"[red]Error:[/red] scan report not found: {scan_report_file}"
+            )
             sys.exit(2)
         corroboration_report = CorroborationReport.model_validate(
             json.loads(scan_report_file.read_text())
@@ -1299,7 +1309,10 @@ def recommend_cmd(
         help="Path to EvalSampleSet JSON (only used when --gap-report is not supplied)",
     ),
     output_dir: Path = typer.Option(
-        Path("./fixes"), "--output", "-o", help="Directory to write remediation templates to"
+        Path("./fixes"),
+        "--output",
+        "-o",
+        help="Directory to write remediation templates to",
     ),
 ) -> None:
     """
@@ -1310,16 +1323,24 @@ def recommend_cmd(
     """
     if gap_report_file is not None:
         if not gap_report_file.exists():
-            err_console.print(f"[red]Error:[/red] gap report not found: {gap_report_file}")
+            err_console.print(
+                f"[red]Error:[/red] gap report not found: {gap_report_file}"
+            )
             sys.exit(2)
         report = GapReport.model_validate(json.loads(gap_report_file.read_text()))
     else:
         if not manifest_file.exists():
-            err_console.print(f"[red]Error:[/red] manifest file not found: {manifest_file}")
-            err_console.print("Run [bold]opencomplai init[/bold] first, or pass --gap-report.")
+            err_console.print(
+                f"[red]Error:[/red] manifest file not found: {manifest_file}"
+            )
+            err_console.print(
+                "Run [bold]opencomplai init[/bold] first, or pass --gap-report."
+            )
             sys.exit(2)
         try:
-            manifest = SystemManifest.model_validate(json.loads(manifest_file.read_text()))
+            manifest = SystemManifest.model_validate(
+                json.loads(manifest_file.read_text())
+            )
         except Exception as e:
             err_console.print(f"[red]Validation error:[/red] {e}")
             sys.exit(2)
@@ -1338,7 +1359,9 @@ def recommend_cmd(
         corroboration_report = None
         if scan_report_file is not None:
             if not scan_report_file.exists():
-                err_console.print(f"[red]Error:[/red] scan report not found: {scan_report_file}")
+                err_console.print(
+                    f"[red]Error:[/red] scan report not found: {scan_report_file}"
+                )
                 sys.exit(2)
             corroboration_report = CorroborationReport.model_validate(
                 json.loads(scan_report_file.read_text())
@@ -1366,7 +1389,9 @@ def recommend_cmd(
         )
         return
 
-    console.print(f"[bold]Wrote {len(written)} remediation template(s) to {output_dir}[/bold]")
+    console.print(
+        f"[bold]Wrote {len(written)} remediation template(s) to {output_dir}[/bold]"
+    )
     for path in written:
         console.print(f"  {path}")
 
@@ -1413,12 +1438,16 @@ def report_cmd(
 
     artifact = None
     if artifact_file is not None and artifact_file.exists():
-        artifact = ScanStatusArtifact.model_validate(json.loads(artifact_file.read_text()))
+        artifact = ScanStatusArtifact.model_validate(
+            json.loads(artifact_file.read_text())
+        )
 
     gap_report = None
     if gap_report_file is not None:
         if not gap_report_file.exists():
-            err_console.print(f"[red]Error:[/red] gap report not found: {gap_report_file}")
+            err_console.print(
+                f"[red]Error:[/red] gap report not found: {gap_report_file}"
+            )
             sys.exit(2)
         gap_report = GapReport.model_validate(json.loads(gap_report_file.read_text()))
 
@@ -2295,7 +2324,9 @@ def scan_cmd(
     if sarif_output is not None:
         from opencomplai_core.scanner.sarif import report_to_sarif
 
-        sarif_output.write_text(json.dumps(report_to_sarif(report), indent=2), encoding="utf-8")
+        sarif_output.write_text(
+            json.dumps(report_to_sarif(report), indent=2), encoding="utf-8"
+        )
         console.print(f"[dim]SARIF written to {sarif_output}[/dim]")
 
     if enqueue_review and report.severity in (
@@ -2390,6 +2421,16 @@ def check_cmd(
         "--with-gaps",
         help="Attach a per-article gap_report to the artifact (additive, informational only)",
     ),
+    change_context: str | None = typer.Option(
+        None,
+        "--change-context",
+        help=(
+            "Declared reason for this deployment's change, e.g. model_retrain | "
+            "purpose_change | capability_extension. A recognized value trips the "
+            "Article 25 substantial-modification trap (EU_AIA_ART25_MODIFICATION_TRAP, "
+            "exit code 4) and freezes deployment pending HITL review."
+        ),
+    ),
     output: OutputFormat = typer.Option(OutputFormat.human, "--output", "-o"),
 ) -> None:
     """
@@ -2471,6 +2512,7 @@ def check_cmd(
             eval_failed,
             eval_hashes,
             scan_summary=scan_summary,
+            change_context=change_context,
         )
     else:
         artifact, risk_high = _run_local_check(
@@ -2483,6 +2525,7 @@ def check_cmd(
             eval_failed,
             eval_hashes,
             scan_summary=scan_summary,
+            change_context=change_context,
         )
 
     if scan_failed and artifact.result == ScanResult.PASS:
@@ -2510,13 +2553,16 @@ def check_cmd(
                 modality="text",
                 use_case=manifest.intended_purpose,
                 deployment_context=scan_mode,
-            )
+            ),
+            answers=_answers_from_change_context(change_context),
         )
         gap_risk_result = assess(gap_assessment_input)
         gap_eval_report = None
         if sample_set is not None:
             gap_eval_report = run_evals(
-                manifest.system_id, commit_ref, sample_set.model_copy(update={"commit_ref": commit_ref})
+                manifest.system_id,
+                commit_ref,
+                sample_set.model_copy(update={"commit_ref": commit_ref}),
             )
         gap_report = build_gap_report(
             system_id=manifest.system_id,
@@ -2565,6 +2611,7 @@ def _run_service_check(
     eval_failed: list[str] | None = None,
     eval_hashes: list[str] | None = None,
     scan_summary: ScanSummary | None = None,
+    change_context: str | None = None,
 ) -> tuple[ScanStatusArtifact, bool]:
     """Full 10-step orchestration via gateway services (PRD §12.4).
 
@@ -2630,6 +2677,7 @@ def _run_service_check(
             {
                 "system_id": manifest.system_id,
                 "intended_purpose": manifest.intended_purpose,
+                "change_context": change_context,
             },
         )
         if status >= 400:
@@ -2658,9 +2706,13 @@ def _run_service_check(
     risk_class = risk_data.get("risk_class", "minimal")
     risk_high = risk_class == "high"
     rationale_hash = risk_data.get("rationale_hash", "sha256:unknown")
-    evidence_event_id = risk_data.get("evidence_event_id", "")
-    if evidence_event_id:
-        evidence_hashes.append(evidence_event_id)
+    # FINDING 48.5: risk_data["evidence_event_id"] is a locally-fabricated
+    # request digest ("evt_sha256:<sha256 of the request payload>") minted by
+    # the risk-engine's classify_risk — it is never written to the evidence
+    # ledger, so it is not a ledger event id or evidence hash. It must not be
+    # appended to `evidence_hashes`, which lands verbatim in the SIGNED
+    # ScanStatusArtifact and would misrepresent a request digest as audit
+    # evidence.
 
     # Step 4 — trap gate
     if trap_detected:
@@ -2815,6 +2867,7 @@ def _run_local_check(
     eval_failed: list[str] | None = None,
     eval_hashes: list[str] | None = None,
     scan_summary: ScanSummary | None = None,
+    change_context: str | None = None,
 ) -> tuple[ScanStatusArtifact, bool]:
     """Local engine fallback — no services required.
 
@@ -2831,7 +2884,8 @@ def _run_local_check(
             modality="text",
             use_case=manifest.intended_purpose,
             deployment_context=scan_mode,
-        )
+        ),
+        answers=_answers_from_change_context(change_context),
     )
     risk_result = assess(assessment_input)
     risk_high = risk_result.risk_level == RiskLevel.HIGH
@@ -2964,7 +3018,9 @@ def eval_cmd(
         ),
     ),
     provider_model: str | None = typer.Option(
-        None, "--model", help="Model name to request from --provider or --suite (e.g. gpt-4o-mini)"
+        None,
+        "--model",
+        help="Model name to request from --provider or --suite (e.g. gpt-4o-mini)",
     ),
     provider_api_key_env: str = typer.Option(
         "OPENCOMPLAI_PROVIDER_API_KEY",
@@ -2994,7 +3050,9 @@ def eval_cmd(
     """Run safety, bias, and data-leakage pipeline evaluators."""
     if suite is not None:
         if suite != "inspect-ai":
-            err_console.print(f"[red]Error:[/red] unknown --suite {suite!r} (only 'inspect-ai' is supported)")
+            err_console.print(
+                f"[red]Error:[/red] unknown --suite {suite!r} (only 'inspect-ai' is supported)"
+            )
             sys.exit(2)
         from opencomplai_core.bridges.inspect_eval import (
             curated_task_names,
@@ -3009,9 +3067,13 @@ def eval_cmd(
             )
             sys.exit(2)
         if not provider_model:
-            err_console.print("[red]Error:[/red] --model is required with --suite inspect-ai")
+            err_console.print(
+                "[red]Error:[/red] --model is required with --suite inspect-ai"
+            )
             sys.exit(2)
-        api_key = os.environ.get(provider_api_key_env, "") or os.environ.get("OPENAI_API_KEY", "")
+        api_key = os.environ.get(provider_api_key_env, "") or os.environ.get(
+            "OPENAI_API_KEY", ""
+        )
         task_list = (
             [t.strip() for t in tasks.split(",") if t.strip()]
             if tasks
@@ -3053,7 +3115,9 @@ def eval_cmd(
         sys.exit(0)
 
     if sample_set_file is None:
-        err_console.print("[red]Error:[/red] --sample-set is required unless --suite is set")
+        err_console.print(
+            "[red]Error:[/red] --sample-set is required unless --suite is set"
+        )
         sys.exit(2)
     if not manifest_file.exists():
         err_console.print(f"[red]Error:[/red] manifest not found: {manifest_file}")
@@ -3080,7 +3144,9 @@ def eval_cmd(
 
     if provider is not None:
         if not provider_model:
-            err_console.print("[red]Error:[/red] --model is required when --provider is set")
+            err_console.print(
+                "[red]Error:[/red] --model is required when --provider is set"
+            )
             sys.exit(2)
         api_key = os.environ.get(provider_api_key_env, "")
         if not api_key:
@@ -3447,7 +3513,15 @@ def docs_generate_cmd(
             eval_report=eval_report,
             corroboration_report=scan_report,
         )
-        schema_valid = validate_dossier_schema(dossier)
+        # A declared high_risk_presumption must gate schema validation the
+        # same way the doc-generator service does (see its main.py) — the
+        # dossier alone only carries the assess()-derived risk_class, not
+        # the manifest's presumption, so this must be passed explicitly or
+        # a presumed-high manifest with a non-matching purpose can report
+        # "schema: valid" locally while the service reports it invalid.
+        schema_valid = validate_dossier_schema(
+            dossier, presumed_high=manifest.high_risk_presumption
+        )
 
         output_dir.mkdir(parents=True, exist_ok=True)
         out_file = output_dir / f"dossier_{dossier.dossier_id}.json"
@@ -3795,9 +3869,20 @@ def _preload_ai_model(model_id: str | None) -> bool:
     """
     try:
         from opencomplai_ai.config import get_active_model
-        from opencomplai_ai.downloader import ensure_model
+        from opencomplai_ai.models import MODEL_CATALOG
 
         resolved = model_id or get_active_model()
+        spec = MODEL_CATALOG.get(resolved)
+        if spec is not None and not spec.needs_preload:
+            # codebert-onnx and saas classify with no local artifact at all;
+            # calling ensure_model here routed codebert-onnx into the
+            # separate, optional ONNX-export path — an interactive ~440 MB
+            # download prompt (or, non-interactively, a RuntimeError that
+            # silently disabled --ai-intent) for a backend that needs zero
+            # setup.
+            return True
+        from opencomplai_ai.downloader import ensure_model
+
         ensure_model(resolved)
         return True
     except ImportError:

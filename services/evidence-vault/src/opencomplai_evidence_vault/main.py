@@ -38,7 +38,7 @@ from opencomplai_evidence_vault.bias_alerts import (
     purge_expired_bias_data,
     store_bias_alert,
 )
-from opencomplai_evidence_vault.cas import CONTENT_HASH_RE, CASStore, get_cas_backend
+from opencomplai_evidence_vault.cas import CONTENT_HASH_RE, CASBackend, get_cas_backend
 from opencomplai_evidence_vault.controls import (
     get_fingerprint,
     list_controls,
@@ -123,7 +123,13 @@ def _to_async_database_url(database_url: str) -> str:
 
 
 def _service_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    # main.py lives at services/evidence-vault/src/opencomplai_evidence_vault/
+    # main.py — parents[2] is services/evidence-vault, where alembic.ini and
+    # migrations/ live (see infra/docker/evidence-vault.Dockerfile COPYs).
+    # This was previously parents[3] (services/), which meant
+    # _alembic_ini_path().exists() was always False and the
+    # EVIDENCE_VAULT_AUTO_MIGRATE=1 path below silently never ran.
+    return Path(__file__).resolve().parents[2]
 
 
 def _alembic_ini_path() -> Path:
@@ -175,13 +181,41 @@ async def get_tenant_session(
     """
     async_session: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     async with async_session() as session:
-        if session.bind is not None and session.bind.dialect.name == "postgresql":
+        is_postgres = (
+            session.bind is not None and session.bind.dialect.name == "postgresql"
+        )
+        if is_postgres:
             await session.execute(text("SET ROLE evidence_vault_app"))
             await session.execute(
                 text("SELECT set_config('app.tenant_id', :tid, true)"),
                 {"tid": tenant_id},
             )
-        yield session
+        try:
+            yield session
+        finally:
+            if is_postgres:
+                # SET ROLE (unlike the tenant GUC above, whose set_config
+                # third argument scopes it to the transaction) is
+                # session-level and survives COMMIT, and the pool's checkin
+                # only issues a ROLLBACK — without an explicit reset the
+                # restricted evidence_vault_app role leaks onto whichever
+                # request next reuses this pooled physical connection,
+                # including ones (plain sessionmaker() users like /ready)
+                # that expect the connection's real default role.
+                #
+                # Roll back first: if the route raised mid-transaction,
+                # Postgres rejects every statement except ROLLBACK/COMMIT
+                # in the aborted-transaction state, and RESET ROLE would
+                # mask the route's real exception with a new error.
+                if session.in_transaction():
+                    await session.rollback()
+                await session.execute(text("RESET ROLE"))
+                # RESET ROLE is itself transactional: executing it starts a
+                # fresh (autobegin) transaction, and the session close that
+                # follows this generator rolls that transaction back —
+                # silently undoing the reset. Commit to make it stick on
+                # the physical connection before it returns to the pool.
+                await session.commit()
 
 
 class AppendEventRequest(BaseModel):
@@ -434,13 +468,76 @@ def create_app() -> FastAPI:
     )
 
     # Every /v1/* route requires a valid internal service token (SEC-SERVICE-AUTH) —
-    # only /health and /metrics stay reachable without one, for compose/k8s healthchecks
-    # and the Prometheus scraper, neither of which can present a service token.
+    # only /health, /ready and /metrics stay reachable without one, for compose/k8s
+    # healthchecks and the Prometheus scraper, none of which can present a service token.
     router = APIRouter(dependencies=[Depends(require_service_principal)])
 
     @app.get("/health")
     async def health() -> dict:
+        """Static liveness probe — kept unchanged for backward compatibility.
+        Use /ready to also confirm the database is actually migrated."""
         return {"status": "ok", "service": "evidence-vault"}
+
+    @app.get("/ready")
+    async def ready(request: Request) -> dict:
+        """
+        Readiness probe: unlike /health this exercises the database and, on
+        Postgres, confirms the evidence_vault_app role exists — the role
+        migration 0004 creates and get_tenant_session SET ROLEs to on every
+        /v1/* request. Without it every such request 500s with
+        'role "evidence_vault_app" does not exist' even though /health still
+        reports ok (issue #48, finding 11). The container's entrypoint runs
+        migrations before uvicorn starts, so this is defense-in-depth for
+        deployments that bypass that entrypoint.
+        """
+        sessionmaker = getattr(request.app.state, "sessionmaker", None)
+        if sessionmaker is None:
+            raise HTTPException(status_code=503, detail="database not initialized")
+
+        try:
+            async with sessionmaker() as session:
+                if (
+                    session.bind is not None
+                    and session.bind.dialect.name == "postgresql"
+                ):
+                    result = await session.execute(
+                        text(
+                            "SELECT 1 FROM pg_roles WHERE rolname = 'evidence_vault_app'"
+                        )
+                    )
+                    if result.scalar_one_or_none() is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "evidence_vault_app role is missing - "
+                                "migrations have not run (see migration 0004)"
+                            ),
+                        )
+                    # Roles are cluster-level and survive `alembic downgrade
+                    # base`, so the role existing does not prove the schema
+                    # is migrated — probe a migrated table as well.
+                    result = await session.execute(
+                        text("SELECT to_regclass('public.ledger_events')")
+                    )
+                    if result.scalar_one_or_none() is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "ledger_events table is missing - "
+                                "migrations have not run"
+                            ),
+                        )
+                else:
+                    await session.execute(text("SELECT 1"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"database connectivity check failed: {exc.__class__.__name__}",
+            ) from exc
+
+        return {"status": "ready"}
 
     @app.get("/metrics")
     async def metrics():
@@ -531,9 +628,9 @@ def create_app() -> FastAPI:
                 status_code=422, detail=f"Invalid base64 content: {exc}"
             ) from exc
 
-        cas: CASStore = request.app.state.cas
+        cas: CASBackend = request.app.state.cas
         content_hash = cas.write(content)
-        storage_uri = str(cas._path_for(content_hash))
+        storage_uri = cas.storage_uri(content_hash)
 
         source = request_body.source or principal
         collected_at = request_body.collected_at or datetime.now(UTC).isoformat()
@@ -610,7 +707,7 @@ def create_app() -> FastAPI:
                 detail=f"Invalid content hash format: {content_hash!r}",
             )
 
-        cas: CASStore = request.app.state.cas
+        cas: CASBackend = request.app.state.cas
         try:
             content = cas.read(content_hash)
         except FileNotFoundError:
@@ -972,7 +1069,9 @@ def create_app() -> FastAPI:
         session: AsyncSession = Depends(get_tenant_session),
         tenant_id: str = Depends(get_tenant_id),
     ) -> CompletedEvalLookupResponse:
-        result_json = await get_completed_eval(session, eval_run_id, tenant_id=tenant_id)
+        result_json = await get_completed_eval(
+            session, eval_run_id, tenant_id=tenant_id
+        )
         if result_json is None:
             return CompletedEvalLookupResponse(found=False)
         return CompletedEvalLookupResponse(found=True, result_json=result_json)

@@ -3,9 +3,9 @@
 Wipe all demo-* data from a running OpenComplAI stack.
 
 Usage:
-    python scripts/reset_demo.py               # wipe only
-    python scripts/reset_demo.py --reseed      # wipe then re-seed
-    python scripts/reset_demo.py --dry-run     # print what would be deleted
+    python sync/reset_demo.py               # wipe only
+    python sync/reset_demo.py --reseed      # wipe then re-seed
+    python sync/reset_demo.py --dry-run     # print what would be deleted
 
 The 'demo-' prefix isolates demo data completely — production records
 are never touched, even if WHERE clauses are accidentally widened.

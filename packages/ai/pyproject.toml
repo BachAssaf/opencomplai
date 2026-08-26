@@ -24,6 +24,13 @@ Documentation = "https://docs.opencomplai.com"
 deep = [
     "llama-cpp-python>=0.3.0",
 ]
+# Only needed for the explicit, optional ONNX export/prefetch of the
+# codebert-onnx catalog entry (downloader._ensure_onnx_export) — the
+# classifier itself (classifier.IntentClassifier) is a deterministic
+# code-signal matcher that needs neither this extra nor a download.
+onnx = [
+    "optimum[onnxruntime]>=1.18",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",

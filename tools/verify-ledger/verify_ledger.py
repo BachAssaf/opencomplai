@@ -9,11 +9,14 @@ Performs two independent checks:
 
   2. Dossier anchor   — when --dossier is supplied, walks the chain history
      via /v1/evidence/ledger-history-tips and confirms the dossier's recorded
-     section4.ledger_root_hash appears at some historical point in the chain.
-     This catches the threat that Gap #4 was designed to address: an attacker
-     who truncates the ledger, removes an inconvenient event, and then
-     recomputes all subsequent prev_hash values so verify-chain still returns
-     True.  verify-chain alone cannot detect that attack; the anchor check can.
+     record_keeping.ledger_root_hash appears at some historical point in the
+     chain (dossiers generated before the Art. 12 record-keeping split still
+     carry this hash at the legacy section4.ledger_root_hash location, which
+     is read as a fallback). This catches the threat that Gap #4 was designed
+     to address: an attacker who truncates the ledger, removes an
+     inconvenient event, and then recomputes all subsequent prev_hash values
+     so verify-chain still returns True.  verify-chain alone cannot detect
+     that attack; the anchor check can.
 
 Usage:
     python3 verify_ledger.py
@@ -84,11 +87,34 @@ def check_chain_integrity(base_url: str, timeout: int = 10) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _extract_ledger_anchor(dossier: dict) -> str | None:
+    """
+    Read the dossier's ledger anchor hash.
+
+    `record_keeping.ledger_root_hash` is the current location (Art. 12
+    record-keeping was split out of Annex IV point 4 into its own
+    `ArticleTwelveRecordKeeping` model — see packages/core/dossier.py).
+    `section4.ledger_root_hash` is the legacy pre-split location, kept here
+    as a fallback so dossiers generated before the split still verify.
+    """
+    record_keeping = dossier.get("record_keeping")
+    if isinstance(record_keeping, dict):
+        anchor = record_keeping.get("ledger_root_hash")
+        if anchor:
+            return anchor
+
+    legacy_section4 = dossier.get("section4")
+    if isinstance(legacy_section4, dict):
+        return legacy_section4.get("ledger_root_hash")
+
+    return None
+
+
 def check_dossier_anchor(
     base_url: str, dossier_path: str, timeout: int = 10
 ) -> tuple[bool, str]:
     """
-    Verify that the dossier's section4.ledger_root_hash appears in the chain's
+    Verify that the dossier's ledger anchor hash appears in the chain's
     historical rolling tips.
 
     Returns (True, "") on success or (False, reason) on failure.
@@ -103,14 +129,13 @@ def check_dossier_anchor(
     # Support both flat dossier JSON and envelope {"dossier": {...}}
     dossier = raw.get("dossier", raw)
     anchor: str | None = (
-        dossier.get("section4", {}).get("ledger_root_hash")
-        if isinstance(dossier, dict)
-        else None
+        _extract_ledger_anchor(dossier) if isinstance(dossier, dict) else None
     )
 
     if not anchor:
         return False, (
-            "section4.ledger_root_hash is null — anchoring failed at dossier "
+            "record_keeping.ledger_root_hash (and legacy section4."
+            "ledger_root_hash) is null — anchoring failed at dossier "
             "generation time (check EVIDENCE_VAULT_URL on the doc-generator)."
         )
 
@@ -175,8 +200,9 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to a dossier JSON file. When supplied, performs the anchor check "
-            "(Check 2): confirms that the dossier's section4.ledger_root_hash "
-            "appears in the chain's rolling history (detects ledger truncation)."
+            "(Check 2): confirms that the dossier's record_keeping.ledger_root_hash "
+            "(or the legacy section4.ledger_root_hash) appears in the chain's "
+            "rolling history (detects ledger truncation)."
         ),
     )
     parser.add_argument(

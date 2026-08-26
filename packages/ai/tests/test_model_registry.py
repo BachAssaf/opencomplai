@@ -78,3 +78,14 @@ def test_resolve_caches_instance():
         b1 = ModelRegistry.resolve("codebert-onnx")
         b2 = ModelRegistry.resolve("codebert-onnx")
     assert b1 is b2
+
+
+def test_needs_preload_matches_what_resolve_actually_requires():
+    # resolve() only calls ensure_model for the GGUF/llama-cpp entries;
+    # codebert-onnx and saas classify with no local artifact. The CLI's
+    # pre-scan preload keys off this flag, so it must track that reality.
+    assert MODEL_CATALOG["codebert-onnx"].needs_preload is False
+    assert MODEL_CATALOG["saas"].needs_preload is False
+    for model_id, spec in MODEL_CATALOG.items():
+        if spec.runtime == "llama-cpp":
+            assert spec.needs_preload is True, model_id

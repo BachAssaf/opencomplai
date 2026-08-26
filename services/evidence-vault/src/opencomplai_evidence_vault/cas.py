@@ -54,6 +54,14 @@ class CASBackend(ABC):
     def exists(self, content_hash: str) -> bool:
         """Return True if an object with this hash exists."""
 
+    @abstractmethod
+    def storage_uri(self, content_hash: str) -> str:
+        """Return the backend-specific storage location for an object.
+
+        Opaque to callers — persisted verbatim as EvidenceObjectDB.storage_uri
+        for provenance/audit purposes, never parsed or reconstructed from.
+        """
+
 
 class LocalCASBackend(CASBackend):
     """Local filesystem content-addressable store."""
@@ -102,6 +110,12 @@ class LocalCASBackend(CASBackend):
 
     def exists(self, content_hash: str) -> bool:
         return self._path_for(content_hash).exists()
+
+    def storage_uri(self, content_hash: str) -> str:
+        """Public accessor for the filesystem path — identical to the value
+        write()/read() derive internally via _path_for, so previously stored
+        evidence_objects.storage_uri rows keep resolving to the same path."""
+        return str(self._path_for(content_hash))
 
 
 class VercelBlobCASBackend(CASBackend):
@@ -163,6 +177,10 @@ class VercelBlobCASBackend(CASBackend):
             return True
         except Exception:
             return False
+
+    def storage_uri(self, content_hash: str) -> str:
+        """Public accessor for the blob key this object is stored under."""
+        return self._key(content_hash)
 
 
 # ---------------------------------------------------------------------------

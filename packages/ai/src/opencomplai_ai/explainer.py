@@ -3,13 +3,58 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
+import os
 import threading
+import warnings
+
+from pydantic import ValidationError
 
 from opencomplai_ai.models import (
     IntentAnnotation,
+    apply_subject_gate_backstop,
     derive_eu_obligations,
     derive_risk_tier,
 )
+
+logger = logging.getLogger(__name__)
+
+_TIMEOUT_ENV_VAR = "OPENCOMPLAI_AI_TIMEOUT_SECONDS"
+_DEFAULT_TIMEOUT_SECONDS = 10.0
+
+
+def _resolve_timeout_seconds() -> float:
+    """Read the per-completion timeout from OPENCOMPLAI_AI_TIMEOUT_SECONDS.
+
+    Falls back to the documented default (and warns) on anything that isn't
+    a positive number, rather than letting a typo turn into an unbounded
+    wait or an instant timeout.
+    """
+    raw = os.environ.get(_TIMEOUT_ENV_VAR)
+    if not raw:
+        return _DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        warnings.warn(
+            f"{_TIMEOUT_ENV_VAR}={raw!r} is not a number; "
+            f"using default {_DEFAULT_TIMEOUT_SECONDS}s.",
+            stacklevel=2,
+        )
+        return _DEFAULT_TIMEOUT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        # isfinite() also rejects nan: float("inf") would otherwise pass the
+        # positivity check and later crash Event.wait(timeout=inf) with an
+        # OverflowError that escapes classify() entirely.
+        warnings.warn(
+            f"{_TIMEOUT_ENV_VAR}={raw!r} must be a positive, finite number; "
+            f"using default {_DEFAULT_TIMEOUT_SECONDS}s.",
+            stacklevel=2,
+        )
+        return _DEFAULT_TIMEOUT_SECONDS
+    return value
+
 
 _SYSTEM_PROMPT = """\
 You are an EU AI Act (Reg. 2024/1689) code auditor. Classify what the code \
@@ -102,7 +147,10 @@ def _build_prompt(snippet: str, declared_purpose: str, location: str) -> str:
 def _parse_annotation(data: dict, model_id: str, confidence: float) -> IntentAnnotation:
     area = data.get("annex_iii_area")
     if isinstance(area, float):
-        area = int(area) if area == int(area) else None
+        # json.loads accepts the bare NaN/Infinity tokens, and int() on a
+        # non-finite float raises instead of converting — which would escape
+        # the ValidationError-only guard around this function's caller.
+        area = int(area) if math.isfinite(area) and area == int(area) else None
     if not isinstance(area, int) or area not in range(1, 9):
         area = None
 
@@ -114,24 +162,11 @@ def _parse_annotation(data: dict, model_id: str, confidence: float) -> IntentAnn
     explanation = data.get("explanation")
     limited = not art5 and area is None and data.get("risk_tier") == "limited_risk"
 
-    # Defensive backstop: the system prompt instructs the model to leave
-    # annex_iii_area null when the scored subject isn't a natural person,
-    # but LLM output is probabilistic and can be self-inconsistent (area set
-    # + subject_type correctly "legal_entity"/"system" in the same response).
-    # Cross-check against the pack's subject_gated flag rather than trusting
-    # area and subject_type to already agree.
-    if area is not None and subject in ("legal_entity", "system"):
-        from opencomplai_ai.knowledge.annex_iii import lookup_by_area
-
-        entries = lookup_by_area(area)
-        if entries and entries[0].subject_gated:
-            area = None
-            art6_3 = False
-            if not explanation:
-                explanation = (
-                    "Annex III area suppressed: model reported subject_type="
-                    f"{subject}, and this area is scoped to natural persons."
-                )
+    area, art6_3, backstop_explanation = apply_subject_gate_backstop(
+        area, subject, art6_3
+    )
+    if backstop_explanation and not explanation:
+        explanation = backstop_explanation
 
     obligations = derive_eu_obligations(
         autonomy,  # type: ignore[arg-type]
@@ -173,6 +208,23 @@ class IntentExplainer:
         self._model_path = ensure_model(model_id)
         self._llama = None
         self._lock = threading.Lock()
+        # Guards the completion itself, not just _load(). llama-cpp's
+        # Llama.__call__ is not thread-safe on one instance, and a
+        # timed-out call leaves its worker running as an abandoned daemon
+        # thread (see classify()). This lock is acquired by the *caller*
+        # and released from *inside the worker* — so a still-running zombie
+        # keeps holding it, and the next classify() call can detect that and
+        # refuse to start a second, concurrent completion instead of racing
+        # the first.
+        self._inference_lock = threading.Lock()
+        self.timeout_seconds = _resolve_timeout_seconds()
+        #: What kept the most recent classify() call from returning a real
+        #: annotation: "timeout" | "backend_busy" | "model_load_failed" |
+        #: "crash" | "malformed_json" | "invalid_schema" | None (last call
+        #: succeeded, or none has run yet). Read by callers that want to
+        #: distinguish these instead of a bare None.
+        self.last_failure: str | None = None
+        self.timeout_count = 0
 
     def _load(self) -> None:
         if self._llama is not None:
@@ -199,63 +251,163 @@ class IntentExplainer:
         *,
         token: str = "",
         ai_usage_type: str | None = None,
+        gate_reason: str | None = None,
         legacy: bool = False,
     ) -> IntentAnnotation | None:
         try:
             with self._lock:
                 self._load()
-
-            prompt = _build_prompt(snippet, declared_purpose, location)
-
-            result = None
-            completed = threading.Event()
-
-            def _run() -> None:
-                nonlocal result
-                try:
-                    output = self._llama(
-                        prompt,
-                        max_tokens=300,
-                        temperature=0.0,
-                        stop=["```"],
-                    )
-                    result = output["choices"][0]["text"]
-                except Exception:
-                    result = None
-                finally:
-                    completed.set()
-
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            completed.wait(timeout=10)
-
-            if result is None:
-                return (
-                    None
-                    if not legacy
-                    else IntentAnnotation(model_id=self._model_id, risk_tier="minimal")
-                )
-
-            raw = result.strip()
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start == -1 or end == 0:
-                return (
-                    None
-                    if not legacy
-                    else IntentAnnotation(model_id=self._model_id, risk_tier="minimal")
-                )
-
-            data = json.loads(raw[start:end])
-            ann = _parse_annotation(data, self._model_id, confidence=0.75)
-            if ai_usage_type and ann.ai_usage_type is None:
-                ann = ann.model_copy(update={"ai_usage_type": ai_usage_type})
-            if ann.risk_tier == "minimal" and not legacy:
-                return None
-            return ann
         except Exception:
-            return (
-                None
-                if not legacy
-                else IntentAnnotation(model_id=self._model_id, risk_tier="minimal")
+            logger.exception("IntentExplainer(%s): model load failed", self._model_id)
+            return self._fail("model_load_failed", legacy)
+
+        # Built before acquiring the inference lock: if this ever raised
+        # (it can't today — detector always passes plain strings) after the
+        # acquire, the lock would leak and every later call would see a
+        # permanent, spurious "backend_busy".
+        prompt = _build_prompt(snippet, declared_purpose, location)
+
+        if not self._inference_lock.acquire(blocking=False):
+            # A previous call's worker never returned (almost certainly a
+            # timed-out completion still running in the background). Starting
+            # a second completion now would call self._llama concurrently
+            # with that zombie, which is not thread-safe — refuse instead.
+            logger.warning(
+                "IntentExplainer(%s): a previous completion has not "
+                "returned yet (likely timed out); refusing to start a "
+                "concurrent one against the same llama instance.",
+                self._model_id,
             )
+            self.last_failure = "backend_busy"
+            return None
+
+        raw_text, crashed = self._run_completion(prompt)
+
+        if raw_text is None and not crashed:
+            self.timeout_count += 1
+            self.last_failure = "timeout"
+            logger.warning(
+                "IntentExplainer(%s): completion timed out after %.1fs "
+                "(location=%s) — returning no annotation rather than "
+                "fabricating one; the worker keeps running in the "
+                "background.",
+                self._model_id,
+                self.timeout_seconds,
+                location or "unknown",
+            )
+            # A timeout means "we don't know", never "minimal risk" — this
+            # is the one failure mode that must not fall back to a
+            # fabricated annotation even in legacy mode.
+            return None
+
+        if crashed:
+            return self._fail("crash", legacy)
+
+        data = self._parse_json(raw_text)
+        if data is None:
+            return self._fail("malformed_json", legacy)
+
+        try:
+            ann = _parse_annotation(data, self._model_id, confidence=0.75)
+        except ValidationError:
+            # Syntactically-valid JSON can still carry schema-invalid values
+            # (e.g. decision_autonomy="semi_automated", not in its Literal) —
+            # a distinct failure mode from malformed_json (which never even
+            # produced a parseable dict). Without this guard the
+            # ValidationError raised while constructing IntentAnnotation
+            # escaped classify() entirely, and scan_engine's phase-level
+            # except then discarded every AI-intent finding for the scan.
+            logger.warning(
+                "IntentExplainer(%s): model output was valid JSON but failed "
+                "schema validation",
+                self._model_id,
+                exc_info=True,
+            )
+            return self._fail("invalid_schema", legacy)
+        if ai_usage_type and ann.ai_usage_type is None:
+            ann = ann.model_copy(update={"ai_usage_type": ai_usage_type})
+        if gate_reason and ann.gate_reason is None:
+            ann = ann.model_copy(update={"gate_reason": gate_reason})
+        self.last_failure = None
+        if ann.risk_tier == "minimal" and not legacy:
+            return None
+        return ann
+
+    def _run_completion(self, prompt: str) -> tuple[str | None, bool]:
+        """Run one completion on a worker thread with a bounded wait.
+
+        The inference lock taken by ``classify()`` is released *inside* the
+        worker, not by the caller — so on a timeout the lock stays held by
+        the still-running worker, and the next ``classify()`` call sees it
+        busy rather than invoking ``self._llama`` concurrently.
+
+        Returns ``(raw_text, crashed)``; ``raw_text`` is ``None`` on timeout
+        (``crashed`` is only meaningful once the worker has actually run).
+        """
+        result: str | None = None
+        crashed = False
+        completed = threading.Event()
+
+        def _run() -> None:
+            nonlocal result, crashed
+            try:
+                output = self._llama(
+                    prompt,
+                    max_tokens=300,
+                    temperature=0.0,
+                    stop=["```"],
+                )
+                result = output["choices"][0]["text"]
+            except Exception:
+                crashed = True
+                logger.exception(
+                    "IntentExplainer(%s): llama completion raised",
+                    self._model_id,
+                )
+            finally:
+                # Release before signaling completion: a caller that wakes
+                # up on `completed` must already be able to re-acquire the
+                # lock, or a fast next call would see a false "busy".
+                self._inference_lock.release()
+                completed.set()
+
+        thread = threading.Thread(target=_run, daemon=True)
+        try:
+            thread.start()
+        except Exception:
+            # The worker never ran, so it will never release the lock —
+            # release it here or every later call is permanently "busy".
+            self._inference_lock.release()
+            raise
+        if not completed.wait(timeout=self.timeout_seconds):
+            return None, False
+        return result, crashed
+
+    def _parse_json(self, raw_text: str) -> dict | None:
+        raw = raw_text.strip()
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start == -1 or end == 0:
+            logger.warning(
+                "IntentExplainer(%s): model output had no JSON object: %r",
+                self._model_id,
+                raw[:200],
+            )
+            return None
+        try:
+            return json.loads(raw[start:end])
+        except json.JSONDecodeError:
+            logger.warning(
+                "IntentExplainer(%s): model output was not valid JSON: %r",
+                self._model_id,
+                raw[start:end][:200],
+            )
+            return None
+
+    def _fail(self, kind: str, legacy: bool) -> IntentAnnotation | None:
+        """Uniform bookkeeping for a non-timeout failure, plus the historical
+        legacy-mode fallback of always returning *some* annotation."""
+        self.last_failure = kind
+        if legacy:
+            return IntentAnnotation(model_id=self._model_id, risk_tier="minimal")
+        return None

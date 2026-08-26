@@ -14,13 +14,13 @@
     Export directory. Defaults to {gitRoot}/github-issues.
 
 .EXAMPLE
-    ./scripts/sync-github-issues.ps1
+    ./sync/sync-github-issues.ps1
 
 .EXAMPLE
-    ./scripts/sync-github-issues.ps1 -State open -Prune
+    ./sync/sync-github-issues.ps1 -State open -Prune
 
 .EXAMPLE
-    ./scripts/sync-github-issues.ps1 -DryRun
+    ./sync/sync-github-issues.ps1 -DryRun
 
 .NOTES
     Prerequisites:

@@ -1,4 +1,12 @@
-# Exclude root-level API from the docs project (Root Dir: ./).
-# Leading slash anchors to repo root — does NOT exclude dashboard-saas/api/.
-# The dashboard-api Vercel project (Root Dir: dashboard-saas) handles those.
+# Exclude the root-level api/ Vercel serverless functions (gateway, risk,
+# evidence, docs-gen, egress — see api/*/[...path].{ts,py}) from the docs
+# project's build; the docs project doesn't need them.
+#
+# Leading slash anchors this pattern to the repo root (this file's
+# directory), not to every "api" directory found deeper in the tree.
+#
+# NOTE: an earlier version of this comment referenced a "dashboard-saas"
+# directory and a "dashboard-api" Vercel project; neither exists in this
+# repo (verified at HEAD). The full multi-project Vercel deploy topology
+# isn't captured anywhere in this repo — there is no vercel.json checked in.
 /api/

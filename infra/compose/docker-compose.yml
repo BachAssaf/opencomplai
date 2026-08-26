@@ -136,6 +136,10 @@ services:
       PORT: "8002"
       INTERNAL_SERVICE_TOKEN_SECRET: ${INTERNAL_SERVICE_TOKEN_SECRET:?INTERNAL_SERVICE_TOKEN_SECRET is required}
       OSS_BADGE_PUBLIC_KEY_PATH: ${OSS_BADGE_PUBLIC_KEY_PATH:-}
+      # Opt-out for the container entrypoint's default `alembic upgrade
+      # head` (see infra/docker/evidence-vault-entrypoint.sh). Leave unset/0
+      # unless a separate step already runs migrations for this database.
+      EVIDENCE_VAULT_SKIP_MIGRATIONS: ${EVIDENCE_VAULT_SKIP_MIGRATIONS:-0}
     volumes:
       - evidence_data:/data/evidence
       - key_data:/data/keys
@@ -145,7 +149,11 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      # /ready (not /health) also confirms the evidence_vault_app role and
+      # schema migrations landed, so downstream services' `depends_on:
+      # condition: service_healthy` don't come up against an unmigrated
+      # evidence-vault (issue #48 finding 11).
+      test: ["CMD", "curl", "-f", "http://localhost:8002/ready"]
       interval: 15s
       timeout: 5s
       retries: 5

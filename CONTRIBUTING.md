@@ -21,10 +21,20 @@ Check for issues labelled `good first issue` to find starter work. For anything 
 ```bash
 git clone https://github.com/Opencomplai/opencomplai
 cd opencomplai
-./scripts/bootstrap.sh
+./sync/bootstrap.sh
 ```
 
 `bootstrap.sh` installs all Python and Node.js dependencies, configures pre-commit hooks, and runs a doctor check.
+
+`packages/cli/src/opencomplai_cli/data/checker-local.html` is a committed build artifact
+(the offline EU AI Act Checker page), not hand-written source. Regenerate it after changing
+anything under `docs/checker-widget/`:
+
+```bash
+cd docs/checker-widget && npm ci && node build.mjs && node build-local-html.mjs
+```
+
+CI verifies the committed file is up to date with the source.
 
 ## 5. Branch naming
 

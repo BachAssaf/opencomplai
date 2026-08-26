@@ -231,6 +231,82 @@ async def test_annex_iv_attestation_passthrough_marks_high_risk_sections_complet
 
 
 @pytest.mark.asyncio
+async def test_high_risk_presumption_with_non_matching_purpose_fails_schema_valid(
+    service_auth_headers, stub_vault
+):
+    """FINDING 48.6: high_risk_presumption=True must gate schema_valid even
+    when intended_purpose ("chatbot") doesn't keyword-match a high-risk rule
+    and no Annex IV attestations were supplied — previously this produced an
+    all-placeholder dossier stamped schema_valid=True."""
+    payload = {
+        "system_id": "test",
+        "commit_ref": "abc123",
+        "intended_purpose": "chatbot",
+        "high_risk_presumption": True,
+    }
+    status, body = await _post_generate(payload, service_auth_headers)
+    assert status == 200
+    assert body["schema_valid"] is False
+
+    dossier = stub_vault["dossier"]
+    assert dossier["section1"]["risk_class"] != "high"
+    assert dossier["section2_complete"] is False
+    assert dossier["annex_iv_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_high_risk_presumption_with_non_matching_purpose_and_attestations_passes(
+    service_auth_headers, stub_vault
+):
+    """The same presumed-high, non-matching-purpose request passes once the
+    caller actually supplies the Section 2 / Annex IV attestation fields."""
+    payload = {
+        "system_id": "test",
+        "commit_ref": "abc123",
+        "intended_purpose": "chatbot",
+        "high_risk_presumption": True,
+        "training_data_description": "real training data description",
+        "model_architecture": "real model architecture description",
+        "human_oversight_measures": ["Two-person review on every override"],
+        "monitoring_approach": "Datadog + custom drift checks every 6h",
+        "incident_response_procedure": "Runbook at runbooks/ai-incident.md",
+        "metrics_appropriateness_rationale": (
+            "Precision/recall are appropriate for a binary screening decision."
+        ),
+        "lifecycle_changes": ["v1.1: recalibrated decision threshold"],
+        "change_log_reference": "CHANGELOG.md#v1.1",
+        "harmonised_standards": ["EN ISO/IEC 42001:2023"],
+        "eu_declaration_of_conformity_ref": "DoC-2026-001",
+        "post_market_monitoring_plan_ref": "docs/pmm-plan.md",
+        "post_market_monitoring_summary": "Quarterly drift review with sign-off.",
+    }
+    status, body = await _post_generate(payload, service_auth_headers)
+    assert status == 200
+    assert body["schema_valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_genuine_high_risk_still_fails_schema_valid_without_presumption(
+    service_auth_headers, stub_vault
+):
+    """A genuinely high-risk purpose with high_risk_presumption left at its
+    default (False) must still fail schema_valid when unattested — the new
+    presumed_high plumbing must not become the only path to strict gating."""
+    payload = {
+        "system_id": "test",
+        "commit_ref": "abc123",
+        "intended_purpose": "employment screening",
+    }
+    status, body = await _post_generate(payload, service_auth_headers)
+    assert status == 200
+    assert body["schema_valid"] is False
+
+    dossier = stub_vault["dossier"]
+    assert dossier["section1"]["risk_class"] == "high"
+    assert dossier["annex_iv_complete"] is False
+
+
+@pytest.mark.asyncio
 async def test_annex_iv_attestation_absent_keeps_high_risk_dossier_incomplete(
     service_auth_headers, stub_vault
 ):

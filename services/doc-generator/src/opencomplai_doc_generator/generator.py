@@ -139,6 +139,10 @@ def generate_dossier(
 
     Args:
         manifest: The system manifest describing the AI system.
+            `manifest.high_risk_presumption` is consulted here: a
+            provider-declared presumption of high risk gates Section 2 /
+            Annex IV completeness the same as a genuine "high" classification,
+            even when `risk_result.risk_level` came back lower.
         risk_result: The risk assessment result from the risk engine.
         evidence_hashes: SHA-256 hashes of evidence objects in the vault.
         ledger_root_hash: Current Merkle root of the evidence ledger.
@@ -183,7 +187,15 @@ def generate_dossier(
     _section2_arch_complete = bool(
         manifest.model_architecture and manifest.model_architecture != _stub
     )
-    _is_high_risk = risk_result.risk_level.value == "high"
+    # A provider-declared high_risk_presumption gates completeness the same
+    # as a genuine "high" classification from assess() — the presumption
+    # exists precisely so a declared-high-risk system can't slip through as
+    # complete just because its intended_purpose text doesn't keyword-match
+    # any Annex III rule. It never *downgrades* a rules-derived classification
+    # (e.g. "unacceptable" stays ungated by this flag, same as before).
+    _is_high_risk = (
+        risk_result.risk_level.value == "high" or manifest.high_risk_presumption
+    )
     # section2_complete is False only when high-risk AND at least one required
     # field is missing/stub.  For non-high-risk systems stubs are acceptable.
     section2_complete = not _is_high_risk or (
@@ -375,7 +387,9 @@ def _sign_bundle_ed25519(bundle_json: str, key_path: str) -> str | None:
         return None
 
 
-def validate_dossier_schema(dossier: AnnexIVDossier) -> bool:
+def validate_dossier_schema(
+    dossier: AnnexIVDossier, presumed_high: bool = False
+) -> bool:
     """
     Validate that a dossier contains all required Annex IV sections and fields.
 
@@ -386,6 +400,13 @@ def validate_dossier_schema(dossier: AnnexIVDossier) -> bool:
     the provider attestations in Sections 6-9. It previously inspected only
     six Section 1 fields plus two hashes, so a dossier carrying 5 of 9 sections
     passed the release gate as complete.
+
+    `presumed_high` mirrors the manifest's `high_risk_presumption` used by
+    `generate_dossier` to compute `section2_complete`/`annex_iv_complete`: the
+    dossier itself only carries the assess()-derived `section1.risk_class`,
+    so a caller whose request was declared high-risk (but keyword-classified
+    otherwise by assess()) must pass `presumed_high=True` here too, or this
+    validator would skip the attestation checks below.
     """
     required_section1_fields = [
         "system_name",
@@ -409,7 +430,7 @@ def validate_dossier_schema(dossier: AnnexIVDossier) -> bool:
     if dossier.record_keeping is None:
         return False
 
-    if dossier.section1.risk_class == "high":
+    if dossier.section1.risk_class == "high" or presumed_high:
         # Every Annex IV point must be attested, not merely instantiated.
         for section in (
             dossier.section6,

@@ -67,7 +67,7 @@ fi
 # --- Doctor check ---
 echo ""
 echo "Running environment check..."
-python3 scripts/doctor.py
+python3 sync/doctor.py
 
 echo ""
 echo "Bootstrap complete."

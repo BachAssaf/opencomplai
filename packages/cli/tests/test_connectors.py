@@ -99,7 +99,10 @@ class TestGitHubActionsConnector:
 
         assert code == 2
 
-    def test_exit_code_propagation_trap_detected(self, tmp_path, monkeypatch):
+    def test_exit_code_propagation_trap_detected(self, tmp_path, monkeypatch, capsys):
+        """FINDING 48.8: trap_detected is a build failure (Article 25
+        deployment freeze) and must exit 4 with an error annotation, not
+        pass silently through exit 0."""
         from opencomplai_cli.connectors.github_actions import run_connector
 
         monkeypatch.chdir(tmp_path)  # see isolation note above
@@ -111,8 +114,43 @@ class TestGitHubActionsConnector:
             mock_run.return_value = MagicMock(stdout=artifact, stderr="", returncode=0)
             code = run_connector(env={})
 
-        # trap_detected is not a build failure.
-        assert code == 0
+        assert code == 4
+        assert "::error::" in capsys.readouterr().out
+
+    def test_exit_code_propagation_policy_block(self, tmp_path, monkeypatch, capsys):
+        """FINDING 48.8: policy_block (prohibited/Article 5 system) must fail
+        the build (exit 3) with an error annotation, not the `notice` a
+        passing/degraded result gets."""
+        from opencomplai_cli.connectors.github_actions import run_connector
+
+        monkeypatch.chdir(tmp_path)
+        artifact = json.dumps(
+            {"result": "policy_block", "system_id": "s", "content_hash": "c" * 64}
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=artifact, stderr="", returncode=0)
+            code = run_connector(env={})
+
+        assert code == 3
+        assert "::error::" in capsys.readouterr().out
+
+    def test_exit_code_propagation_validation_fail(self, tmp_path, monkeypatch, capsys):
+        """FINDING 48.8: validation_fail (manifest/input validation error)
+        must fail the build (exit 2) with an error annotation."""
+        from opencomplai_cli.connectors.github_actions import run_connector
+
+        monkeypatch.chdir(tmp_path)
+        artifact = json.dumps(
+            {"result": "validation_fail", "system_id": "s", "content_hash": "d" * 64}
+        )
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=artifact, stderr="", returncode=2)
+            code = run_connector(env={})
+
+        assert code == 2
+        assert "::error::" in capsys.readouterr().out
 
     def test_set_output_written_to_file(self, tmp_path):
         from opencomplai_cli.connectors.github_actions import _set_output
@@ -428,6 +466,61 @@ class TestGitLabCIConnector:
             code = run_connector(env={}, junit_path=os.devnull)
 
         assert code == 0
+
+    def test_run_connector_trap_detected_returns_4(self, tmp_path, monkeypatch, capsys):
+        """FINDING 48.8: trap_detected is a pipeline failure (Article 25
+        deployment freeze) and must exit 4, not pass silently through 0."""
+        from opencomplai_cli.connectors.gitlab_ci import run_connector
+
+        monkeypatch.chdir(tmp_path)
+        artifact = json.dumps({"result": "trap_detected", "system_id": "s"})
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=artifact, stderr="", returncode=0)
+            code = run_connector(env={}, junit_path=os.devnull)
+
+        assert code == 4
+        assert "trap_detected" in capsys.readouterr().err
+
+    def test_run_connector_policy_block_returns_3(self, tmp_path, monkeypatch, capsys):
+        """FINDING 48.8: policy_block (prohibited/Article 5 system) must
+        fail the pipeline (exit 3)."""
+        from opencomplai_cli.connectors.gitlab_ci import run_connector
+
+        monkeypatch.chdir(tmp_path)
+        artifact = json.dumps({"result": "policy_block", "system_id": "s"})
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=artifact, stderr="", returncode=0)
+            code = run_connector(env={}, junit_path=os.devnull)
+
+        assert code == 3
+        assert "policy_block" in capsys.readouterr().err
+
+    def test_run_connector_validation_fail_returns_2(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """FINDING 48.8: validation_fail (manifest/input validation error)
+        must fail the pipeline (exit 2)."""
+        from opencomplai_cli.connectors.gitlab_ci import run_connector
+
+        monkeypatch.chdir(tmp_path)
+        artifact = json.dumps({"result": "validation_fail", "system_id": "s"})
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=artifact, stderr="", returncode=2)
+            code = run_connector(env={}, junit_path=os.devnull)
+
+        assert code == 2
+        assert "validation_fail" in capsys.readouterr().err
+
+    def test_build_junit_xml_trap_detected_is_a_failure(self):
+        """FINDING 48.8: trap_detected now fails the build, so the JUnit
+        case must report it as a <failure>, not a <system-out> that would
+        leave the test report green while the pipeline exit code is 4."""
+        from opencomplai_cli.connectors.gitlab_ci import _build_junit_xml
+
+        artifact = {"result": "trap_detected", "system_id": "s"}
+        xml = _build_junit_xml(artifact, "some output")
+        assert "<failure" in xml
+        assert "trap_detected" in xml
 
     def test_run_connector_missing_binary_returns_2(self):
         from opencomplai_cli.connectors.gitlab_ci import run_connector

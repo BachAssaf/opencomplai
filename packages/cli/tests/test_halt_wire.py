@@ -15,9 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from opencomplai_cli import main
 from opencomplai_cli.main import app
-from opencomplai_core.models import ScanResult, SystemState
+from opencomplai_core.models import SystemState
 from opencomplai_core.signing import generate_keypair
 from opencomplai_core.system_state_store import load_state, save_state, state_record
 from typer.testing import CliRunner
@@ -59,28 +58,52 @@ def _write_manifest(tmp_path: Path, system_id: str, intended_purpose: str) -> Pa
 
 
 def test_check_local_trap_persists_halted_state(tmp_path, monkeypatch):
+    """FINDING 48.2: a real manifest + `--change-context model_retrain` trips
+    EU_AIA_ART25_MODIFICATION_TRAP through the actual local engine (no
+    mocking of the result mapping) and exits 4."""
     state_dir = _isolate(tmp_path, monkeypatch)
     manifest_file = _write_manifest(tmp_path, "halt-sys-1", "customer support chatbot")
 
-    # No convenient manifest input trips EU_AIA_ART25_MODIFICATION_TRAP
-    # through the local engine directly, so force the trap result the same
-    # way `_run_local_check` would see it.
-    monkeypatch.setattr(
-        main,
-        "_result_from_local",
-        lambda risk_result: (
-            ScanResult.TRAP_DETECTED,
-            ["EU_AIA_ART25_MODIFICATION_TRAP"],
-        ),
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--manifest",
+            str(manifest_file),
+            "--change-context",
+            "model_retrain",
+        ],
     )
-
-    result = runner.invoke(app, ["check", "--manifest", str(manifest_file)])
     assert result.exit_code == 4, result.output
 
     assert load_state(state_dir, "halt-sys-1") == SystemState.HALTED_PENDING_REVIEW
     record = state_record(state_dir, "halt-sys-1")
     assert record is not None
     assert record["reason"] == "trap_detected"
+
+
+def test_check_local_unrecognized_change_context_does_not_trip_trap(
+    tmp_path, monkeypatch
+):
+    """A --change-context value outside the risk-engine's recognized set
+    (model_retrain | purpose_change | capability_extension) must not trip
+    the trap -- confirms the CLI mirrors the risk-engine's exact keyword set
+    rather than trapping on any non-empty value."""
+    state_dir = _isolate(tmp_path, monkeypatch)
+    manifest_file = _write_manifest(tmp_path, "halt-sys-1b", "customer support chatbot")
+
+    result = runner.invoke(
+        app,
+        [
+            "check",
+            "--manifest",
+            str(manifest_file),
+            "--change-context",
+            "refactor",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert load_state(state_dir, "halt-sys-1b") == SystemState.RUNNING
 
 
 # ---------------------------------------------------------------------------

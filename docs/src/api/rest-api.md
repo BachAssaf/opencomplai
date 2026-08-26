@@ -109,7 +109,7 @@ Classify the risk level of an AI system under EU AI Act Annex III.
   "trap_detected": false,
   "profiling_detected": false,
   "rationale_hash": "sha256:3e2f1a...",
-  "evidence_event_id": "b7f3a1e2-..."
+  "evidence_event_id": "evt_sha256:9c1d4f..."
 }
 ```
 
@@ -119,7 +119,7 @@ Classify the risk level of an AI system under EU AI Act Annex III.
 | `trap_detected` | `bool` | `true` if the substantial-modification trap rule triggered. |
 | `profiling_detected` | `bool` | `true` if an Art. 6 profiling signal was detected. |
 | `rationale_hash` | `string` | SHA-256 of the assessment rationale. |
-| `evidence_event_id` | `string` | UUID of the appended ledger event (if evidence-vault is reachable). |
+| `evidence_event_id` | `string` | Deterministic `evt_sha256:<hex>` digest of the classification request (system_id, intended_purpose, features, change_context, rationale_hash). It is **not** the id of a ledger event — `POST /v1/risk/classify` does not append anything to the evidence-vault ledger. |
 
 ---
 
