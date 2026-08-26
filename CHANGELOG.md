@@ -11,6 +11,48 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.0] — 2026-08-26
+
+### Added
+
+- Per-tenant ledger sequencing and a hash chain that commits to the payload's
+  prefix (migrations `0008`, `0009`), closing gaps in cross-tenant isolation
+  and chain-tamper detection (community contribution, [#49](https://github.com/Opencomplai/opencomplai/pull/49), issues #46/#47).
+- `opencomplai-gha-connector` / `opencomplai-gitlab-connector` console
+  scripts are now actually registered, so the CI integration commands the
+  docs reference work after `pip install` instead of failing with "command
+  not found".
+- Vercel gateway adapter type-checking and end-to-end adapter tests
+  (mount-prefix rewrite + handler).
+
+### Fixed
+
+- The AI classifier no longer crashes on non-finite (`NaN`/`Infinity`)
+  `annex_iii_area` or timeout values, which previously escaped validation
+  and silently wiped every AI finding for the scan.
+- The SaaS backend's subject-gating now matches the local backend's
+  narrower `art6_3_profiling`-clearing behavior instead of clearing it on
+  every null `annex_iii_area`.
+- The CLI no longer routes the zero-setup codebert-onnx backend through the
+  optional ONNX-export path, which prompted for a ~440 MB download (or
+  silently disabled `--ai-intent` in CI).
+- `NATURAL_PERSON_CUES` no longer subject-gates migration/asylum use cases
+  out of Annex III 7(b) due to an untokenizable compound cue
+  (`asylum_seeker` → `asylum`, `refugee`).
+- Evidence vault: `get_tenant_session`'s restricted role no longer leaks
+  onto the pooled connection after COMMIT.
+- The Vercel adapter now strips the mount prefix correctly so adapter
+  requests reach real routes.
+- `packages/cli/src/opencomplai_cli/data/checker-local.html` is committed
+  so a fresh clone can actually install: `packages/cli/pyproject.toml`
+  force-includes it in the wheel, but it was previously untracked.
+
+Thanks to [@HasanAlHalabi](https://github.com/HasanAlHalabi) for the
+[#49](https://github.com/Opencomplai/opencomplai/pull/49) contribution
+(issues #45–#48).
+
+---
+
 ## [0.4.0] — 2026-08-20
 
 ### Added
